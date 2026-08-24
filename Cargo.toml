@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/keepalive-core",
+    "crates/keepalive-daemon",
+    "crates/keepalive-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["cmg8431"]
+license = "MIT"
+repository = "https://github.com/cmg8431/keepalive"
+
+[workspace.dependencies]
+keepalive-core = { path = "crates/keepalive-core" }
+keepalive-daemon = { path = "crates/keepalive-daemon" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "macros", "signal"] }
+anyhow = "1"
+dirs = "6"
+toml = "0.8"
+
+[profile.release]
+lto = true
+opt-level = 3
+codegen-units = 1
+strip = true

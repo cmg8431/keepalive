@@ -1,0 +1,49 @@
+{
+  "description": "keepalive wake-hold hooks: acquire while an agent turn is running, release when it stops",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v keepalive >/dev/null 2>&1 && keepalive acquire --from-hook; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v keepalive >/dev/null 2>&1 && keepalive acquire --from-hook; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v keepalive >/dev/null 2>&1 && keepalive release --from-hook; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v keepalive >/dev/null 2>&1 && keepalive release --from-hook; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

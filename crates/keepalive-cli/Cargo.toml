@@ -1,0 +1,17 @@
+[package]
+name = "keepalive-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "keepalive"
+path = "src/main.rs"
+
+[dependencies]
+keepalive-core.workspace = true
+keepalive-daemon.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true

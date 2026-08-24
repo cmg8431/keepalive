@@ -1,0 +1,19 @@
+{
+  "name": "keepalive",
+  "version": "0.1.0",
+  "description": "Keeps your Mac awake while agents work — and lets it sleep when it's safer to.",
+  "author": {
+    "name": "cmg8431"
+  },
+  "repository": "https://github.com/cmg8431/keepalive",
+  "license": "MIT",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "keep-awake",
+    "sleep",
+    "macos",
+    "agent"
+  ],
+  "homepage": "https://github.com/cmg8431/keepalive#readme"
+}

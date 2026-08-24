@@ -1,0 +1,11 @@
+[package]
+name = "keepalive-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+dirs.workspace = true
+toml.workspace = true
