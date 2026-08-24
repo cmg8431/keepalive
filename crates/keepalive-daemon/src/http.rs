@@ -23,15 +23,11 @@ struct Assets;
 #[derive(Clone)]
 struct AppState {
     daemon: Arc<Mutex<Daemon>>,
-    config: Arc<Config>,
 }
 
 pub async fn serve_http(daemon: Arc<Mutex<Daemon>>, config: Config) {
     let port = config.web_port;
-    let state = AppState {
-        daemon,
-        config: Arc::new(config),
-    };
+    let state = AppState { daemon };
     let app = Router::new()
         .route("/api/status", get(api_status))
         .route("/api/events", get(api_events))
@@ -39,73 +35,138 @@ pub async fn serve_http(daemon: Arc<Mutex<Daemon>>, config: Config) {
         .route("/api/sleep", post(api_sleep))
         .route("/api/spawn", post(api_spawn))
         .route("/api/kill", post(api_kill))
+        .route("/api/setup", get(api_setup))
+        .route("/api/setup/provider", post(api_setup_provider))
+        .route("/api/setup/ntfy", post(api_setup_ntfy))
         .fallback(static_assets)
         .with_state(state);
 
-    let mut addrs = vec![SocketAddr::from(([127, 0, 0, 1], port))];
-    if let Some(ip) = tailscale_ip() {
-        addrs.push(SocketAddr::new(ip, port));
-    }
-    for addr in addrs {
-        let app = app.clone();
-        tokio::spawn(async move {
-            match tokio::net::TcpListener::bind(addr).await {
-                Ok(listener) => {
-                    println!("[keepalived] dashboard on http://{addr}");
-                    if let Err(e) = axum::serve(listener, app).await {
-                        eprintln!("[keepalived] dashboard server on {addr} failed: {e}");
-                    }
-                }
-                Err(e) => eprintln!("[keepalived] dashboard bind {addr} failed: {e}"),
+    bind(app.clone(), SocketAddr::from(([127, 0, 0, 1], port)));
+    // The Tailscale interface can appear at any time (setup wizard installs
+    // it live), so keep watching and bind as soon as it exists.
+    tokio::spawn(async move {
+        let mut bound: Option<IpAddr> = None;
+        loop {
+            if let Some(ip) = crate::connect::tailscale_ip()
+                && bound != Some(ip)
+            {
+                bind(app.clone(), SocketAddr::new(ip, port));
+                bound = Some(ip);
             }
-        });
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    });
+}
+
+fn bind(app: Router, addr: SocketAddr) {
+    tokio::spawn(async move {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                println!("[keepalived] dashboard on http://{addr}");
+                if let Err(e) = axum::serve(listener, app).await {
+                    eprintln!("[keepalived] dashboard server on {addr} failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("[keepalived] dashboard bind {addr} failed: {e}"),
+        }
+    });
+}
+
+fn qr_svg(data: &str) -> Option<String> {
+    let code = qrcode::QrCode::new(data).ok()?;
+    Some(
+        code.render::<qrcode::render::svg::Color>()
+            .min_dimensions(180, 180)
+            .quiet_zone(true)
+            .build(),
+    )
+}
+
+fn random_topic() -> String {
+    use std::io::Read;
+    let mut buf = [0u8; 6];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut buf);
+    }
+    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    format!("keepalive-{hex}")
+}
+
+async fn api_setup(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let config = state.daemon.lock().unwrap().config().clone();
+    let ts_ip = crate::connect::tailscale_ip();
+    let dashboard_url = ts_ip.map(|ip| format!("http://{ip}:{}", config.web_port));
+    let ntfy_url =
+        (!config.ntfy_topic.is_empty()).then(|| format!("https://ntfy.sh/{}", config.ntfy_topic));
+    Json(serde_json::json!({
+        "ok": true,
+        "providers": crate::connect::providers(),
+        "ntfy_topic": config.ntfy_topic,
+        "heartbeat_minutes": config.heartbeat_minutes,
+        "clamshell_ready": crate::clamshell::passwordless_available(),
+        "dashboard_url": dashboard_url,
+        "dashboard_qr": dashboard_url.as_deref().and_then(qr_svg),
+        "ntfy_url": ntfy_url,
+        "ntfy_qr": ntfy_url.as_deref().and_then(qr_svg),
+    }))
+}
+
+#[derive(Deserialize)]
+struct ProviderBody {
+    id: String,
+}
+
+async fn api_setup_provider(
+    State(_state): State<AppState>,
+    Json(body): Json<ProviderBody>,
+) -> Json<serde_json::Value> {
+    match crate::connect::begin(&body.id) {
+        Ok(message) => Json(serde_json::json!({ "ok": true, "message": message })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
 }
 
-/// The Mac's own Tailscale address (100.64.0.0/10). Tries the tailscale CLI,
-/// then falls back to scanning interfaces.
-fn tailscale_ip() -> Option<IpAddr> {
-    for bin in [
-        "/usr/local/bin/tailscale",
-        "/opt/homebrew/bin/tailscale",
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    ] {
-        if let Ok(out) = std::process::Command::new(bin).args(["ip", "-4"]).output()
-            && out.status.success()
-            && let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next()
-            && let Ok(ip) = line.trim().parse::<IpAddr>()
-        {
-            return Some(ip);
-        }
-    }
-    let out = std::process::Command::new("ifconfig").output().ok()?;
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("inet ")
-            && let Some(addr) = rest.split_whitespace().next()
-            && let Ok(IpAddr::V4(v4)) = addr.parse::<IpAddr>()
-            && is_cgnat(v4)
-        {
-            return Some(IpAddr::V4(v4));
-        }
-    }
-    None
+#[derive(Deserialize)]
+struct NtfyBody {
+    enable: bool,
 }
 
-fn is_cgnat(ip: std::net::Ipv4Addr) -> bool {
-    // 100.64.0.0/10
-    let o = ip.octets();
-    o[0] == 100 && (64..128).contains(&o[1])
+async fn api_setup_ntfy(
+    State(state): State<AppState>,
+    Json(body): Json<NtfyBody>,
+) -> Json<serde_json::Value> {
+    let mut config = state.daemon.lock().unwrap().config().clone();
+    if body.enable {
+        if config.ntfy_topic.is_empty() {
+            config.ntfy_topic = random_topic();
+        }
+        if config.heartbeat_minutes == 0 {
+            config.heartbeat_minutes = 20;
+        }
+    } else {
+        config.ntfy_topic.clear();
+        config.heartbeat_minutes = 0;
+    }
+    if let Err(e) = config.save() {
+        return Json(serde_json::json!({ "ok": false, "error": format!("saving config: {e}") }));
+    }
+    state.daemon.lock().unwrap().reload_config(config.clone());
+    Json(serde_json::json!({ "ok": true, "ntfy_topic": config.ntfy_topic }))
 }
 
 fn ask(state: &AppState, req: Request) -> serde_json::Value {
     state.daemon.lock().unwrap().handle(req)
 }
 
+fn status_with_projects(state: &AppState) -> serde_json::Value {
+    let mut daemon = state.daemon.lock().unwrap();
+    let mut status = daemon.handle(Request::Status);
+    status["projects"] = serde_json::json!(daemon.config().projects);
+    status
+}
+
 async fn api_status(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let mut status = ask(&state, Request::Status);
-    status["projects"] = serde_json::json!(state.config.projects);
-    Json(status)
+    Json(status_with_projects(&state))
 }
 
 async fn api_events(
@@ -114,8 +175,7 @@ async fn api_events(
     let stream =
         tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(Duration::from_secs(3)))
             .map(move |_| {
-                let mut status = ask(&state, Request::Status);
-                status["projects"] = serde_json::json!(state.config.projects);
+                let status = status_with_projects(&state);
                 Ok(Event::default().data(status.to_string()))
             });
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -157,7 +217,8 @@ async fn api_spawn(
     State(state): State<AppState>,
     Json(body): Json<SpawnBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if state.config.projects.is_empty() {
+    let projects = state.daemon.lock().unwrap().config().projects.clone();
+    if projects.is_empty() {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
@@ -173,7 +234,7 @@ async fn api_spawn(
             Json(serde_json::json!({ "ok": false, "error": "directory does not exist" })),
         );
     };
-    let allowed = state.config.projects.iter().any(|p| {
+    let allowed = projects.iter().any(|p| {
         std::path::Path::new(p)
             .canonicalize()
             .is_ok_and(|allow| canonical.starts_with(allow))

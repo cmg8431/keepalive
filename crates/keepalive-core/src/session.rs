@@ -4,6 +4,10 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone)]
 pub struct Session {
     pub source: String,
+    /// Human-meaningful context (project directory name), so the UI never
+    /// has to show a bare UUID.
+    pub label: Option<String>,
+    pub acquired_at: Instant,
     pub expires_at: Instant,
 }
 
@@ -15,14 +19,35 @@ pub struct SessionTable {
 }
 
 impl SessionTable {
-    pub fn acquire(&mut self, id: &str, source: &str, ttl: Duration, now: Instant) {
-        self.sessions.insert(
-            id.to_string(),
-            Session {
-                source: source.to_string(),
-                expires_at: now + ttl,
-            },
-        );
+    /// A renewal (same id) extends the TTL but keeps the original
+    /// acquired_at, so "active for Nm" stays truthful.
+    pub fn acquire(
+        &mut self,
+        id: &str,
+        source: &str,
+        label: Option<&str>,
+        ttl: Duration,
+        now: Instant,
+    ) {
+        match self.sessions.get_mut(id) {
+            Some(existing) => {
+                existing.expires_at = now + ttl;
+                if let Some(l) = label {
+                    existing.label = Some(l.to_string());
+                }
+            }
+            None => {
+                self.sessions.insert(
+                    id.to_string(),
+                    Session {
+                        source: source.to_string(),
+                        label: label.map(str::to_string),
+                        acquired_at: now,
+                        expires_at: now + ttl,
+                    },
+                );
+            }
+        }
     }
 
     pub fn release(&mut self, id: &str) -> bool {
@@ -58,7 +83,7 @@ mod tests {
     fn acquire_release_roundtrip() {
         let mut t = SessionTable::default();
         let now = Instant::now();
-        t.acquire("a", "claude-code", TTL, now);
+        t.acquire("a", "claude-code", None, TTL, now);
         assert_eq!(t.active_count(), 1);
         assert!(t.release("a"));
         assert_eq!(t.active_count(), 0);
@@ -69,8 +94,14 @@ mod tests {
     fn re_acquire_renews_ttl() {
         let mut t = SessionTable::default();
         let now = Instant::now();
-        t.acquire("a", "claude-code", TTL, now);
-        t.acquire("a", "claude-code", TTL, now + Duration::from_secs(800));
+        t.acquire("a", "claude-code", None, TTL, now);
+        t.acquire(
+            "a",
+            "claude-code",
+            None,
+            TTL,
+            now + Duration::from_secs(800),
+        );
         assert_eq!(t.prune_expired(now + Duration::from_secs(1000)), 0);
         assert_eq!(t.active_count(), 1);
     }
@@ -79,8 +110,8 @@ mod tests {
     fn expired_sessions_are_pruned() {
         let mut t = SessionTable::default();
         let now = Instant::now();
-        t.acquire("a", "claude-code", TTL, now);
-        t.acquire("b", "manual", TTL * 2, now);
+        t.acquire("a", "claude-code", None, TTL, now);
+        t.acquire("b", "manual", None, TTL * 2, now);
         assert_eq!(t.prune_expired(now + TTL), 1);
         assert_eq!(t.active_count(), 1);
     }
@@ -89,8 +120,8 @@ mod tests {
     fn overlapping_sessions_stack() {
         let mut t = SessionTable::default();
         let now = Instant::now();
-        t.acquire("a", "claude-code", TTL, now);
-        t.acquire("b", "codex", TTL, now);
+        t.acquire("a", "claude-code", None, TTL, now);
+        t.acquire("b", "codex", None, TTL, now);
         t.release("a");
         assert_eq!(t.active_count(), 1);
     }

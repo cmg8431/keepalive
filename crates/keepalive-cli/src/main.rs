@@ -3,6 +3,7 @@ mod clamshell_setup;
 mod client;
 mod install;
 mod mcp;
+mod setup;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -83,6 +84,8 @@ enum Commands {
     Kill { name: String },
     /// Run as an MCP stdio server (hold/release/status tools for agents)
     Mcp,
+    /// Open the guided setup (phone access, notifications, language)
+    Setup,
 }
 
 fn main() {
@@ -117,10 +120,13 @@ fn run(cli: Cli) -> Result<()> {
             from_hook,
             tool,
         } => {
-            let (id, source) = resolve_session(id, source, tool, from_hook)?;
+            let (id, source, label) = resolve_session(id, source, tool, from_hook)?;
             let mut req = serde_json::json!({ "cmd": "acquire", "id": id, "source": source });
             if let Some(ttl) = ttl_secs {
                 req["ttl_secs"] = ttl.into();
+            }
+            if let Some(label) = label {
+                req["label"] = label.into();
             }
             client::request_autostart(&req)?;
             Ok(())
@@ -130,7 +136,7 @@ fn run(cli: Cli) -> Result<()> {
             from_hook,
             tool,
         } => {
-            let (id, _) = resolve_session(id, String::new(), tool, from_hook)?;
+            let (id, _, _) = resolve_session(id, String::new(), tool, from_hook)?;
             client::request(&serde_json::json!({ "cmd": "release", "id": id }))?;
             Ok(())
         }
@@ -156,6 +162,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Install => install::install(),
         Commands::Uninstall => install::uninstall(),
         Commands::Mcp => mcp::serve(),
+        Commands::Setup => setup::run(),
         Commands::ClamshellSetup => clamshell_setup::setup(),
         Commands::ClamshellRemove => clamshell_setup::remove(),
         Commands::Run { dir, cmd, name } => {
@@ -203,21 +210,32 @@ fn resolve_session(
     source: String,
     tool: Option<String>,
     from_hook: bool,
-) -> Result<(String, String)> {
+) -> Result<(String, String, Option<String>)> {
     if from_hook {
         let tool = tool.unwrap_or_else(|| "claude-code".to_string());
         let mut input = String::new();
         std::io::stdin().read_to_string(&mut input)?;
         // Agents differ in payload shape; fall back to a per-tool id so
         // acquire and release still pair up without a session id.
-        let id = serde_json::from_str::<serde_json::Value>(&input)
-            .ok()
+        let payload = serde_json::from_str::<serde_json::Value>(&input).ok();
+        let id = payload
+            .as_ref()
             .and_then(|p| p["session_id"].as_str().map(str::to_string))
             .unwrap_or_else(|| format!("{tool}-session"));
-        return Ok((id, tool));
+        // The project directory name is what makes the hold recognizable
+        // in the dashboard, so a UUID never has to stand alone.
+        let label = payload
+            .as_ref()
+            .and_then(|p| p["cwd"].as_str())
+            .and_then(|cwd| {
+                std::path::Path::new(cwd)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            });
+        return Ok((id, tool, label));
     }
     let id = id.ok_or_else(|| anyhow::anyhow!("--id is required (or use --from-hook)"))?;
-    Ok((id, source))
+    Ok((id, source, None))
 }
 
 fn print_hooks_snippet() {

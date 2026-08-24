@@ -22,6 +22,8 @@ pub(crate) enum Request {
         source: Option<String>,
         #[serde(default)]
         ttl_secs: Option<u64>,
+        #[serde(default)]
+        label: Option<String>,
     },
     Release {
         id: String,
@@ -50,6 +52,8 @@ pub(crate) enum Request {
 struct SessionInfo {
     id: String,
     source: String,
+    label: Option<String>,
+    active_secs: u64,
     expires_in_secs: u64,
 }
 
@@ -184,8 +188,13 @@ impl Daemon {
         if woke_from_sleep && let Some(hb) = &self.heartbeat {
             log("woke from sleep — polling wake mailbox");
             if hb.wake_requested() {
-                self.table
-                    .acquire("remote-wake", "phone", Duration::from_secs(1800), now);
+                self.table.acquire(
+                    "remote-wake",
+                    "phone",
+                    Some("remote wake"),
+                    Duration::from_secs(1800),
+                    now,
+                );
                 log("remote wake requested — holding 30 minutes");
                 notify::push(
                     &self.config.ntfy_topic,
@@ -202,8 +211,13 @@ impl Daemon {
         // is a backstop for daemon stalls, not the liveness signal.
         let managed_ttl = Duration::from_secs((self.config.poll_secs * 4).max(60));
         for name in self.managed.running() {
-            self.table
-                .acquire(&format!("managed:{name}"), "managed", managed_ttl, now);
+            self.table.acquire(
+                &format!("managed:{name}"),
+                "managed",
+                Some(&name),
+                managed_ttl,
+                now,
+            );
         }
         let pruned = self.table.prune_expired(now);
         if pruned > 0 {
@@ -285,6 +299,24 @@ impl Daemon {
         }
     }
 
+    pub(crate) fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Live-apply a changed config (setup wizard): notification topic and
+    /// heartbeat take effect without a daemon restart.
+    pub(crate) fn reload_config(&mut self, config: Config) {
+        let passwordless = clamshell::passwordless_available();
+        self.clamshell_ok = config.clamshell && passwordless;
+        self.heartbeat = if config.heartbeat_minutes > 0 && !passwordless {
+            None
+        } else {
+            Heartbeat::new(config.heartbeat_minutes, &config.ntfy_topic)
+        };
+        self.config = config;
+        log("config reloaded");
+    }
+
     fn release_assertion(&mut self, reason: &str) {
         if self.assertion.take().is_some() {
             self.held_since = None;
@@ -300,10 +332,11 @@ impl Daemon {
                 id,
                 source,
                 ttl_secs,
+                label,
             } => {
                 let ttl = ttl_secs.map_or(self.config.default_ttl(), Duration::from_secs);
                 let source = source.unwrap_or_else(|| "unknown".to_string());
-                self.table.acquire(&id, &source, ttl, now);
+                self.table.acquire(&id, &source, label.as_deref(), ttl, now);
                 serde_json::json!({ "ok": true })
             }
             Request::Release { id } => {
@@ -312,7 +345,8 @@ impl Daemon {
             }
             Request::Hold { minutes } => {
                 let ttl = Duration::from_secs(minutes.unwrap_or(60) * 60);
-                self.table.acquire("manual", "manual", ttl, now);
+                self.table
+                    .acquire("manual", "manual", Some("manual hold"), ttl, now);
                 serde_json::json!({ "ok": true })
             }
             Request::Clear => {
@@ -345,6 +379,8 @@ impl Daemon {
                     .map(|(id, s)| SessionInfo {
                         id: id.clone(),
                         source: s.source.clone(),
+                        label: s.label.clone(),
+                        active_secs: now.saturating_duration_since(s.acquired_at).as_secs(),
                         expires_in_secs: s.expires_at.saturating_duration_since(now).as_secs(),
                     })
                     .collect();

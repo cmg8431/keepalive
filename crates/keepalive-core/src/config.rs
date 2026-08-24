@@ -1,8 +1,8 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     /// Below this battery percentage (on battery power) sleep is always allowed.
@@ -58,6 +58,15 @@ impl Config {
 
     pub fn path() -> Option<PathBuf> {
         dirs::config_dir().map(|d| d.join("keepalive/config.toml"))
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        let path = Self::path().ok_or_else(|| std::io::Error::other("no config directory"))?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let text = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(path, text)
     }
 
     pub fn max_hold(&self) -> Duration {
