@@ -1,0 +1,17 @@
+[package]
+name = "keepalive-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "keepalive-menubar"
+path = "src/main.rs"
+
+[dependencies]
+keepalive-core.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tray-icon = "0.21"
+tao = "0.34"

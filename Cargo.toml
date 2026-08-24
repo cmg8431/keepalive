@@ -4,6 +4,7 @@ members = [
     "crates/keepalive-core",
     "crates/keepalive-daemon",
     "crates/keepalive-cli",
+    "crates/keepalive-app",
 ]
 
 [workspace.package]
