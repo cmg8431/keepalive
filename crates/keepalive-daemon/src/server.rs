@@ -1,3 +1,4 @@
+use crate::clamshell;
 use crate::power::{self, SmcReader, WakeAssertion};
 use anyhow::{Context, Result};
 use keepalive_core::config::{Config, socket_path};
@@ -48,6 +49,7 @@ struct StatusResponse {
     temperature_celsius: Option<f64>,
     lid_closed: bool,
     cutout_latched: bool,
+    clamshell_active: bool,
 }
 
 struct Daemon {
@@ -57,13 +59,24 @@ struct Daemon {
     held_since: Option<Instant>,
     smc: Option<SmcReader>,
     latch: CutoutLatch,
+    clamshell_ok: bool,
+    clamshell_active: bool,
+    clamshell_pushed_at: Option<Instant>,
 }
+
+const CLAMSHELL_REPUSH: Duration = Duration::from_secs(60);
 
 impl Daemon {
     fn new(config: Config) -> Self {
         let smc = SmcReader::new();
         if smc.is_none() {
             log("SMC unavailable — thermal cutout disabled");
+        }
+        let clamshell_ok = config.clamshell && clamshell::passwordless_available();
+        if config.clamshell && !clamshell_ok {
+            log(
+                "clamshell requested but passwordless pmset is not configured — run: sudo keepalive clamshell-setup (then restart the daemon)",
+            );
         }
         Self {
             config,
@@ -72,6 +85,40 @@ impl Daemon {
             held_since: None,
             smc,
             latch: CutoutLatch::default(),
+            clamshell_ok,
+            clamshell_active: false,
+            clamshell_pushed_at: None,
+        }
+    }
+
+    /// Re-pushed periodically while blocking: heals a failed pmset or a
+    /// kernel reset across sleep/wake, at the cost of one fork per minute
+    /// only while an agent is held.
+    fn clamshell_sync(&mut self, blocked: bool, now: Instant) {
+        if !self.clamshell_ok {
+            return;
+        }
+        let due = self
+            .clamshell_pushed_at
+            .is_none_or(|t| now - t >= CLAMSHELL_REPUSH);
+        if blocked && (!self.clamshell_active || due) {
+            match clamshell::set_blocked(true) {
+                Ok(()) => {
+                    if !self.clamshell_active {
+                        log("clamshell sleep disabled (lid-close safe)");
+                    }
+                    self.clamshell_active = true;
+                    self.clamshell_pushed_at = Some(now);
+                }
+                Err(e) => log(&format!("clamshell enable failed: {e:#}")),
+            }
+        } else if !blocked && self.clamshell_active {
+            match clamshell::set_blocked(false) {
+                Ok(()) => log("clamshell sleep restored"),
+                Err(e) => log(&format!("clamshell disable failed: {e:#}")),
+            }
+            self.clamshell_active = false;
+            self.clamshell_pushed_at = None;
         }
     }
 
@@ -117,6 +164,7 @@ impl Daemon {
                     self.held_since = Some(now);
                     log("wake assertion acquired");
                 }
+                self.clamshell_sync(true, now);
             }
             Decision::AllowSleep(reason) => {
                 self.release_assertion(&format!("{reason:?}"));
@@ -144,6 +192,7 @@ impl Daemon {
             self.held_since = None;
             log(&format!("wake assertion released ({reason})"));
         }
+        self.clamshell_sync(false, Instant::now());
     }
 
     fn handle(&mut self, req: Request) -> serde_json::Value {
@@ -193,6 +242,7 @@ impl Daemon {
                     temperature_celsius: self.smc.as_ref().and_then(SmcReader::temperature),
                     lid_closed: power::lid_closed(),
                     cutout_latched: self.latch.is_latched(),
+                    clamshell_active: self.clamshell_active,
                 })
                 .unwrap_or_else(|_| serde_json::json!({ "ok": false }));
             }
@@ -208,6 +258,7 @@ fn log(msg: &str) {
 
 pub async fn serve() -> Result<()> {
     let config = Config::load();
+    clamshell::reconcile_on_startup();
     let path = socket_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).context("creating socket directory")?;
@@ -221,6 +272,8 @@ pub async fn serve() -> Result<()> {
 
     let daemon = Arc::new(Mutex::new(Daemon::new(config.clone())));
     let mut poll = tokio::time::interval(Duration::from_secs(config.poll_secs.max(1)));
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("registering SIGTERM handler")?;
 
     loop {
         tokio::select! {
@@ -235,12 +288,23 @@ pub async fn serve() -> Result<()> {
                 });
             }
             _ = tokio::signal::ctrl_c() => {
-                log("shutting down");
-                let _ = std::fs::remove_file(&path);
+                shutdown(&daemon, &path);
+                return Ok(());
+            }
+            _ = sigterm.recv() => {
+                shutdown(&daemon, &path);
                 return Ok(());
             }
         }
     }
+}
+
+/// Every exit path must restore normal sleep: the IOPM assertion dies with
+/// the process, but disablesleep would persist.
+fn shutdown(daemon: &Arc<Mutex<Daemon>>, path: &std::path::Path) {
+    log("shutting down");
+    daemon.lock().unwrap().release_assertion("shutdown");
+    let _ = std::fs::remove_file(path);
 }
 
 async fn handle_connection(stream: UnixStream, daemon: Arc<Mutex<Daemon>>) -> Result<()> {
@@ -258,6 +322,7 @@ async fn handle_connection(stream: UnixStream, daemon: Arc<Mutex<Daemon>>) -> Re
         .await?;
     if shutdown {
         log("shutdown requested");
+        daemon.lock().unwrap().release_assertion("shutdown request");
         let _ = std::fs::remove_file(socket_path());
         std::process::exit(0);
     }

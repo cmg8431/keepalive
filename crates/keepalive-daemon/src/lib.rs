@@ -1,3 +1,4 @@
+pub mod clamshell;
 mod power;
 mod server;
 

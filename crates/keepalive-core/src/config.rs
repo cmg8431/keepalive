@@ -14,6 +14,8 @@ pub struct Config {
     pub poll_secs: u64,
     /// Lid-closed CPU temperature at which all holds are force-released.
     pub thermal_threshold_celsius: f64,
+    /// Keep working with the lid closed (needs `sudo keepalive clamshell-setup`).
+    pub clamshell: bool,
 }
 
 impl Default for Config {
@@ -24,6 +26,7 @@ impl Default for Config {
             default_ttl_secs: 900,
             poll_secs: 15,
             thermal_threshold_celsius: 80.0,
+            clamshell: true,
         }
     }
 }
@@ -52,10 +55,14 @@ impl Config {
     }
 }
 
-pub fn socket_path() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("keepalive/daemon.sock")
+        .join("keepalive")
+}
+
+pub fn socket_path() -> PathBuf {
+    data_dir().join("daemon.sock")
 }
 
 #[cfg(test)]

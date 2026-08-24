@@ -1,3 +1,4 @@
+mod clamshell_setup;
 mod client;
 mod install;
 
@@ -54,6 +55,10 @@ enum Commands {
     Install,
     /// Remove the LaunchAgent and clean up hooks
     Uninstall,
+    /// Install the passwordless pmset rule for lid-closed wake (run with sudo)
+    ClamshellSetup,
+    /// Remove the passwordless pmset rule (run with sudo)
+    ClamshellRemove,
 }
 
 fn main() {
@@ -121,6 +126,8 @@ fn run(cli: Cli) -> Result<()> {
         }
         Commands::Install => install::install(),
         Commands::Uninstall => install::uninstall(),
+        Commands::ClamshellSetup => clamshell_setup::setup(),
+        Commands::ClamshellRemove => clamshell_setup::remove(),
     }
 }
 
