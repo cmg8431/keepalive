@@ -19,7 +19,10 @@ pub fn install() -> Result<()> {
     install_claude_hooks(&bin)?;
     println!("keepalive installed:");
     println!("  daemon: LaunchAgent {LAUNCHD_LABEL} (starts at login, restarts on crash)");
-    println!("  hooks:  registered in {}", settings_path().display());
+    println!("  claude-code: hooks in {}", settings_path().display());
+    for report in crate::agents::install_all(&bin) {
+        println!("  {}: {}", report.name, report.detail);
+    }
     Ok(())
 }
 
@@ -31,6 +34,9 @@ pub fn uninstall() -> Result<()> {
     let _ = std::fs::remove_file(&plist);
     let _ = client::request(&serde_json::json!({ "cmd": "shutdown" }));
     remove_claude_hooks()?;
+    for report in crate::agents::uninstall_all() {
+        println!("  {}: {}", report.name, report.detail);
+    }
     println!("keepalive uninstalled: LaunchAgent removed, hooks cleaned up");
     Ok(())
 }

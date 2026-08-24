@@ -1,6 +1,8 @@
+mod agents;
 mod clamshell_setup;
 mod client;
 mod install;
+mod mcp;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -29,9 +31,12 @@ enum Commands {
         source: String,
         #[arg(long)]
         ttl_secs: Option<u64>,
-        /// Read the session id from a Claude Code hook payload on stdin
+        /// Read the session id from an agent hook payload on stdin
         #[arg(long)]
         from_hook: bool,
+        /// Which agent this hook belongs to (used as source and id fallback)
+        #[arg(long)]
+        tool: Option<String>,
     },
     /// Release a session's wake hold
     Release {
@@ -39,6 +44,8 @@ enum Commands {
         id: Option<String>,
         #[arg(long)]
         from_hook: bool,
+        #[arg(long)]
+        tool: Option<String>,
     },
     /// Keep the Mac awake manually, no agent needed
     Hold {
@@ -74,6 +81,8 @@ enum Commands {
     Sessions,
     /// Kill a managed session
     Kill { name: String },
+    /// Run as an MCP stdio server (hold/release/status tools for agents)
+    Mcp,
 }
 
 fn main() {
@@ -106,8 +115,9 @@ fn run(cli: Cli) -> Result<()> {
             source,
             ttl_secs,
             from_hook,
+            tool,
         } => {
-            let (id, source) = resolve_session(id, source, from_hook)?;
+            let (id, source) = resolve_session(id, source, tool, from_hook)?;
             let mut req = serde_json::json!({ "cmd": "acquire", "id": id, "source": source });
             if let Some(ttl) = ttl_secs {
                 req["ttl_secs"] = ttl.into();
@@ -115,8 +125,12 @@ fn run(cli: Cli) -> Result<()> {
             client::request_autostart(&req)?;
             Ok(())
         }
-        Commands::Release { id, from_hook } => {
-            let (id, _) = resolve_session(id, String::new(), from_hook)?;
+        Commands::Release {
+            id,
+            from_hook,
+            tool,
+        } => {
+            let (id, _) = resolve_session(id, String::new(), tool, from_hook)?;
             client::request(&serde_json::json!({ "cmd": "release", "id": id }))?;
             Ok(())
         }
@@ -141,6 +155,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Commands::Install => install::install(),
         Commands::Uninstall => install::uninstall(),
+        Commands::Mcp => mcp::serve(),
         Commands::ClamshellSetup => clamshell_setup::setup(),
         Commands::ClamshellRemove => clamshell_setup::remove(),
         Commands::Run { dir, cmd, name } => {
@@ -186,17 +201,20 @@ fn print_result(res: &serde_json::Value) {
 fn resolve_session(
     id: Option<String>,
     source: String,
+    tool: Option<String>,
     from_hook: bool,
 ) -> Result<(String, String)> {
     if from_hook {
+        let tool = tool.unwrap_or_else(|| "claude-code".to_string());
         let mut input = String::new();
         std::io::stdin().read_to_string(&mut input)?;
-        let payload: serde_json::Value = serde_json::from_str(&input)?;
-        let id = payload["session_id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("hook payload has no session_id"))?
-            .to_string();
-        return Ok((id, "claude-code".to_string()));
+        // Agents differ in payload shape; fall back to a per-tool id so
+        // acquire and release still pair up without a session id.
+        let id = serde_json::from_str::<serde_json::Value>(&input)
+            .ok()
+            .and_then(|p| p["session_id"].as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("{tool}-session"));
+        return Ok((id, tool));
     }
     let id = id.ok_or_else(|| anyhow::anyhow!("--id is required (or use --from-hook)"))?;
     Ok((id, source))
