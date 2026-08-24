@@ -630,11 +630,13 @@ function Spark({ data }: { data: number[] }) {
   const pts = data.filter((v) => Number.isFinite(v));
   if (pts.length < 2) return null;
   const min = Math.min(...pts);
-  const range = Math.max(...pts) - min || 1;
+  const range = Math.max(...pts) - min;
   const w = 60;
   const h = 14;
+  // A flat series sits mid-height so it reads as "steady", not as a stray rule.
+  const y = (v: number) => (range === 0 ? h / 2 : h - 1 - ((v - min) / range) * (h - 2));
   const path = pts
-    .map((v, i) => `${((i / (pts.length - 1)) * w).toFixed(1)},${(h - 1 - ((v - min) / range) * (h - 2)).toFixed(1)}`)
+    .map((v, i) => `${((i / (pts.length - 1)) * w).toFixed(1)},${y(v).toFixed(1)}`)
     .join(" ");
   return (
     <svg className="spark" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden>
