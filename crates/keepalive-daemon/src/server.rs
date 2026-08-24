@@ -28,6 +28,7 @@ enum Request {
     },
     Clear,
     Status,
+    Shutdown,
 }
 
 #[derive(Serialize)]
@@ -127,6 +128,7 @@ impl Daemon {
                 self.table.clear();
                 serde_json::json!({ "ok": true })
             }
+            Request::Shutdown => serde_json::json!({ "ok": true }),
             Request::Status => {
                 let status = power::read_power_status();
                 let sessions = self
@@ -163,6 +165,9 @@ pub async fn serve() -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).context("creating socket directory")?;
     }
+    if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+        anyhow::bail!("daemon already running at {}", path.display());
+    }
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).context("binding daemon socket")?;
     log(&format!("listening on {}", path.display()));
@@ -195,12 +200,19 @@ async fn handle_connection(stream: UnixStream, daemon: Arc<Mutex<Daemon>>) -> Re
     let (read_half, mut write_half) = stream.into_split();
     let mut line = String::new();
     BufReader::new(read_half).read_line(&mut line).await?;
-    let response = match serde_json::from_str::<Request>(&line) {
+    let parsed = serde_json::from_str::<Request>(&line);
+    let shutdown = matches!(parsed, Ok(Request::Shutdown));
+    let response = match parsed {
         Ok(req) => daemon.lock().unwrap().handle(req),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     write_half
         .write_all(format!("{response}\n").as_bytes())
         .await?;
+    if shutdown {
+        log("shutdown requested");
+        let _ = std::fs::remove_file(socket_path());
+        std::process::exit(0);
+    }
     Ok(())
 }

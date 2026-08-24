@@ -1,4 +1,5 @@
 mod client;
+mod install;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -49,6 +50,10 @@ enum Commands {
     Status,
     /// Print the Claude Code hooks snippet for manual installation
     Hooks,
+    /// Install the LaunchAgent (login autostart) and Claude Code hooks
+    Install,
+    /// Remove the LaunchAgent and clean up hooks
+    Uninstall,
 }
 
 fn main() {
@@ -114,6 +119,8 @@ fn run(cli: Cli) -> Result<()> {
             print_hooks_snippet();
             Ok(())
         }
+        Commands::Install => install::install(),
+        Commands::Uninstall => install::uninstall(),
     }
 }
 
