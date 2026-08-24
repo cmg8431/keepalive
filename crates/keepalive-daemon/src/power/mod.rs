@@ -1,12 +1,16 @@
 #[cfg(target_os = "macos")]
 mod iokit;
 #[cfg(target_os = "macos")]
+pub mod smc;
+#[cfg(target_os = "macos")]
 pub use iokit::WakeAssertion;
+#[cfg(target_os = "macos")]
+pub use smc::SmcReader;
 
 #[cfg(not(target_os = "macos"))]
 mod stub;
 #[cfg(not(target_os = "macos"))]
-pub use stub::WakeAssertion;
+pub use stub::{SmcReader, WakeAssertion};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PowerStatus {
@@ -26,6 +30,23 @@ pub fn read_power_status() -> PowerStatus {
             on_ac_power: true,
         },
     }
+}
+
+/// Reads AppleClamshellState off IOPMrootDomain. Absent (desktops) or any
+/// failure reads as open — the safe direction for the thermal guard.
+pub fn lid_closed() -> bool {
+    match std::process::Command::new("/usr/sbin/ioreg")
+        .args(["-r", "-k", "AppleClamshellState", "-d", "1"])
+        .output()
+    {
+        Ok(out) => parse_lid(&String::from_utf8_lossy(&out.stdout)),
+        Err(_) => false,
+    }
+}
+
+fn parse_lid(text: &str) -> bool {
+    text.lines()
+        .any(|l| l.contains("AppleClamshellState") && l.contains("Yes"))
 }
 
 fn parse_pmset_batt(text: &str) -> PowerStatus {
@@ -62,6 +83,17 @@ mod tests {
         let p = parse_pmset_batt(s);
         assert_eq!(p.battery_percent, Some(100));
         assert!(p.on_ac_power);
+    }
+
+    #[test]
+    fn parses_lid_state() {
+        let closed = r#"+-o IOPMrootDomain  <class IOPMrootDomain>
+    {
+      "AppleClamshellState" = Yes
+    }"#;
+        assert!(parse_lid(closed));
+        assert!(!parse_lid(&closed.replace("Yes", "No")));
+        assert!(!parse_lid(""));
     }
 
     #[test]

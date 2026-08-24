@@ -12,6 +12,8 @@ pub struct Config {
     /// Sessions that stop renewing are dropped after this TTL.
     pub default_ttl_secs: u64,
     pub poll_secs: u64,
+    /// Lid-closed CPU temperature at which all holds are force-released.
+    pub thermal_threshold_celsius: f64,
 }
 
 impl Default for Config {
@@ -21,6 +23,7 @@ impl Default for Config {
             max_hold_hours: 8,
             default_ttl_secs: 900,
             poll_secs: 15,
+            thermal_threshold_celsius: 80.0,
         }
     }
 }

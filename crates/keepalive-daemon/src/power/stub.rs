@@ -6,3 +6,15 @@ impl WakeAssertion {
         Some(Self)
     }
 }
+
+pub struct SmcReader;
+
+impl SmcReader {
+    pub fn new() -> Option<Self> {
+        None
+    }
+
+    pub fn temperature(&self) -> Option<f64> {
+        None
+    }
+}
