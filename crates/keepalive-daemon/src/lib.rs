@@ -1,4 +1,6 @@
 pub mod clamshell;
+mod http;
+mod notify;
 mod power;
 mod server;
 mod sessions;

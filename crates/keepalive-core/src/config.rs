@@ -16,6 +16,12 @@ pub struct Config {
     pub thermal_threshold_celsius: f64,
     /// Keep working with the lid closed (needs `sudo keepalive clamshell-setup`).
     pub clamshell: bool,
+    /// Dashboard port; served on localhost plus the Tailscale interface if present.
+    pub web_port: u16,
+    /// ntfy.sh topic for push notifications (empty = disabled).
+    pub ntfy_topic: String,
+    /// Directories the dashboard may spawn new agent sessions in.
+    pub projects: Vec<String>,
 }
 
 impl Default for Config {
@@ -27,6 +33,9 @@ impl Default for Config {
             poll_secs: 15,
             thermal_threshold_celsius: 80.0,
             clamshell: true,
+            web_port: 7757,
+            ntfy_topic: String::new(),
+            projects: Vec::new(),
         }
     }
 }

@@ -1,6 +1,7 @@
 use crate::clamshell;
+use crate::notify;
 use crate::power::{self, SmcReader, WakeAssertion};
-use crate::sessions::SessionManager;
+use crate::sessions::{ManagedSessionInfo, SessionManager};
 use anyhow::{Context, Result};
 use keepalive_core::config::{Config, socket_path};
 use keepalive_core::policy::{self, CutoutKind, CutoutLatch, Decision, PolicyInput, SleepReason};
@@ -13,7 +14,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 #[derive(Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
-enum Request {
+pub(crate) enum Request {
     Acquire {
         id: String,
         #[serde(default)]
@@ -62,9 +63,10 @@ struct StatusResponse {
     lid_closed: bool,
     cutout_latched: bool,
     clamshell_active: bool,
+    managed: Vec<ManagedSessionInfo>,
 }
 
-struct Daemon {
+pub(crate) struct Daemon {
     config: Config,
     table: SessionTable,
     assertion: Option<WakeAssertion>,
@@ -160,6 +162,7 @@ impl Daemon {
         let now = Instant::now();
         for event in self.managed.monitor(now) {
             log(&event);
+            notify::push(&self.config.ntfy_topic, "keepalive session", &event);
         }
         // Live managed sessions renew their wake holds every tick; the TTL
         // is a backstop for daemon stalls, not the liveness signal.
@@ -191,21 +194,50 @@ impl Daemon {
                 self.clamshell_sync(true, now);
             }
             Decision::AllowSleep(reason) => {
+                let was_awake = self.assertion.is_some();
                 self.release_assertion(&format!("{reason:?}"));
                 // Safety guards evict the sessions that caused the hold and
                 // latch until conditions recover past hysteresis, so a
                 // tripped guard can't re-arm on the next hook ping.
+                let topic = self.config.ntfy_topic.clone();
                 match reason {
-                    SleepReason::NoActiveSessions => {}
-                    SleepReason::ThermalCutout(_) => {
+                    SleepReason::NoActiveSessions => {
+                        if was_awake {
+                            notify::push(
+                                &topic,
+                                "keepalive",
+                                "Work finished — letting the Mac sleep",
+                            );
+                        }
+                    }
+                    SleepReason::ThermalCutout(t) => {
                         self.latch.trip(CutoutKind::Thermal);
                         self.table.clear();
+                        notify::push(
+                            &topic,
+                            "keepalive safety cutout",
+                            &format!("Thermal cutout at {t:.0}C (lid closed) — forcing sleep"),
+                        );
                     }
-                    SleepReason::BatteryBelowFloor(_) => {
+                    SleepReason::BatteryBelowFloor(p) => {
                         self.latch.trip(CutoutKind::LowBattery);
                         self.table.clear();
+                        notify::push(
+                            &topic,
+                            "keepalive safety cutout",
+                            &format!("Battery at {p}% — forcing sleep"),
+                        );
                     }
-                    SleepReason::MaxHoldExceeded => self.table.clear(),
+                    SleepReason::MaxHoldExceeded => {
+                        self.table.clear();
+                        if was_awake {
+                            notify::push(
+                                &topic,
+                                "keepalive",
+                                "Max hold duration reached — letting the Mac sleep",
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -219,7 +251,7 @@ impl Daemon {
         self.clamshell_sync(false, Instant::now());
     }
 
-    fn handle(&mut self, req: Request) -> serde_json::Value {
+    pub(crate) fn handle(&mut self, req: Request) -> serde_json::Value {
         let now = Instant::now();
         let response = match req {
             Request::Acquire {
@@ -284,6 +316,7 @@ impl Daemon {
                     lid_closed: power::lid_closed(),
                     cutout_latched: self.latch.is_latched(),
                     clamshell_active: self.clamshell_active,
+                    managed: self.managed.list(),
                 })
                 .unwrap_or_else(|_| serde_json::json!({ "ok": false }));
             }
@@ -312,6 +345,7 @@ pub async fn serve() -> Result<()> {
     log(&format!("listening on {}", path.display()));
 
     let daemon = Arc::new(Mutex::new(Daemon::new(config.clone())));
+    tokio::spawn(crate::http::serve_http(Arc::clone(&daemon), config.clone()));
     let mut poll = tokio::time::interval(Duration::from_secs(config.poll_secs.max(1)));
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("registering SIGTERM handler")?;
