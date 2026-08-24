@@ -1,0 +1,25 @@
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 2px 0;
+  min-height: 20px;
+}
+
+.section-header h2 {
+  font-size: var(--text-13);
+  font-weight: var(--weight-bold);
+  color: var(--fg-muted);
+}
+
+.section-header .aside {
+  font-size: var(--text-12);
+  color: var(--fg-subtle);
+}

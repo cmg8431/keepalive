@@ -1,0 +1,43 @@
+/* 뚜껑은 여닫는 물건이니 여닫는 그림으로 말한다. */
+.lid {
+  width: 46px;
+  height: 30px;
+  perspective: 90px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.lid-screen {
+  width: 36px;
+  height: 23px;
+  border-radius: 3px 3px 1px 1px;
+  border: 1.4px solid var(--white-60);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.03));
+  transform-origin: bottom center;
+  transform: rotateX(-8deg);
+  transition: transform 300ms var(--easing), height 300ms var(--easing), background var(--transition-fast);
+}
+
+.lid-deck {
+  width: 44px;
+  height: 3.5px;
+  margin-top: 1.5px;
+  border-radius: 0 0 3px 3px;
+  background: var(--white-60);
+}
+
+.lid[data-closed="true"] .lid-screen {
+  height: 4px;
+  transform: rotateX(-72deg);
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.widget:hover .lid-screen {
+  transform: rotateX(-2deg);
+}
+
+.widget:hover .lid[data-closed="true"] .lid-screen {
+  transform: rotateX(-58deg);
+}

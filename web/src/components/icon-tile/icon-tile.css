@@ -1,0 +1,47 @@
+.icon-tile {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-8);
+  background: var(--surface-higher);
+  color: var(--fg-muted);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.icon-tile[data-size="lg"] {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-10);
+}
+
+.icon-tile[data-tone="blue"] {
+  background: var(--fill-blue);
+  color: var(--text-blue);
+}
+
+.icon-tile[data-tone="green"] {
+  background: var(--fill-green);
+  color: var(--text-green);
+}
+
+.icon-tile[data-tone="orange"] {
+  background: var(--fill-orange);
+  color: var(--text-orange);
+}
+
+.icon-tile[data-tone="red"] {
+  background: var(--fill-red);
+  color: var(--text-red);
+}
+
+.icon-tile[data-tone="cobalt"] {
+  background: var(--fill-cobalt);
+  color: var(--text-cobalt);
+}
+
+.icon-tile[data-tone="onGradient"] {
+  background: var(--white-12);
+  color: var(--white-100);
+}

@@ -1,0 +1,37 @@
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 10px 12px;
+  border-radius: var(--radius-12);
+  border: none;
+  background: var(--surface);
+  color: var(--fg-heaviest);
+  font-family: inherit;
+  font-size: var(--text-14);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-1);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.action:hover:not(:disabled) {
+  background: var(--surface-high);
+}
+
+.action:active:not(:disabled) {
+  background: var(--surface-higher);
+}
+
+.action:disabled {
+  opacity: var(--opacity-disabled);
+  cursor: default;
+}

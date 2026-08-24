@@ -1,0 +1,63 @@
+.widgets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.widget {
+  display: flex;
+  flex-direction: column;
+  padding: 12px 13px;
+  border-radius: var(--radius-12);
+  background: var(--surface);
+  transition: background var(--transition-fast);
+}
+
+.widget:hover {
+  background: var(--surface-high);
+}
+
+.widget-label {
+  margin-top: 10px;
+  font-size: var(--text-13);
+  color: var(--fg-muted);
+}
+
+.widget-bottom {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  min-height: 30px;
+}
+
+.widget-value {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.widget-value strong {
+  font-size: var(--text-22);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-2);
+  line-height: 1.1;
+  color: var(--fg-heaviest);
+  font-variant-numeric: tabular-nums;
+}
+
+.widget-value span {
+  font-size: var(--text-13);
+  color: var(--fg-muted);
+}
+
+.widget[data-warn="true"] .widget-value strong {
+  color: var(--text-orange);
+}
+
+.widget-sub {
+  font-size: var(--text-12);
+  color: var(--fg-subtle);
+  text-align: right;
+}

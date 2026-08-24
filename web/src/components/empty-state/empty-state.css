@@ -1,0 +1,12 @@
+.empty {
+  padding: 14px 13px;
+  border-radius: var(--radius-12);
+  background: var(--surface);
+  color: var(--fg-muted);
+  font-size: var(--text-13);
+}
+
+.empty[data-tone="ok"] {
+  background: var(--fill-green);
+  color: var(--text-green);
+}

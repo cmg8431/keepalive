@@ -1,0 +1,164 @@
+/* keepalive 디자인 토큰.
+   구조와 값은 Bezier(오픈소스, Apache-2.0)의 다크 팔레트를 기준으로 잡았다.
+   3계층: 글로벌 원시값 → 시맨틱 → 컴포넌트. 컴포넌트는 시맨틱만 참조한다. */
+
+:root {
+  color-scheme: dark;
+
+  /* ── 글로벌: 중립 ── */
+  --grey-950: #1a1a1c;
+  --grey-900: #1d1d20;
+  --grey-850: #242426;
+  --grey-800: #29292d;
+  --grey-700: #3b3b3f;
+  --grey-600: #79797e;
+  --grey-500: #a7a7aa;
+
+  --white-100: #ffffff;
+  --white-80: rgba(255, 255, 255, 0.8);
+  --white-60: rgba(255, 255, 255, 0.6);
+  --white-40: rgba(255, 255, 255, 0.4);
+  --white-20: rgba(255, 255, 255, 0.2);
+  --white-12: rgba(255, 255, 255, 0.12);
+  --white-8: rgba(255, 255, 255, 0.08);
+
+  /* ── 글로벌: 액센트 hue (다크에서는 300 단계를 쓴다) ── */
+  --blue-300: #8082ff;
+  --green-300: #51c371;
+  --red-300: #f36868;
+  --orange-300: #f79847;
+  --cobalt-300: #5cadef;
+  --yellow-300: #f0be27;
+  --teal-300: #40d3c5;
+
+  /* ── 시맨틱: 표면 ── */
+  --bg: var(--grey-950);
+  --surface: var(--grey-900);
+  --surface-high: var(--grey-850);
+  --surface-higher: var(--grey-800);
+  --surface-glass: rgba(41, 41, 45, 0.9);
+
+  /* ── 시맨틱: 잉크 (다크에서는 white 알파 위계) ── */
+  --fg-heaviest: var(--white-100);
+  --fg: var(--white-80);
+  --fg-muted: var(--white-60);
+  --fg-subtle: var(--white-40);
+
+  /* ── 시맨틱: 선 ── */
+  --border: var(--white-12);
+  --border-strong: var(--white-20);
+  --hairline: 1px;
+
+  /* ── 시맨틱: 액센트 (틴트 18% 배경 + 솔리드 hue 글자/아이콘 한 쌍) ── */
+  --fill-blue: rgba(128, 130, 255, 0.18);
+  --text-blue: var(--blue-300);
+  --fill-green: rgba(81, 195, 113, 0.18);
+  --text-green: var(--green-300);
+  --fill-red: rgba(243, 104, 104, 0.18);
+  --text-red: var(--red-300);
+  --fill-orange: rgba(247, 152, 71, 0.18);
+  --text-orange: var(--orange-300);
+  --fill-cobalt: rgba(92, 173, 239, 0.18);
+  --text-cobalt: var(--cobalt-300);
+
+  /* 역할 별칭: 1차 액션은 blue 로 통일, 상태는 hue 로 인코딩 */
+  --accent: var(--green-300);
+  --primary: var(--blue-300);
+  --warn: var(--orange-300);
+  --danger: var(--red-300);
+
+  /* ── 엘리베이션: inner + base + 퍼짐 합성 ── */
+  --elevation-1:
+    0 1px 2px 0 rgba(0, 0, 0, 0.08),
+    0 0 2px 1px rgba(0, 0, 0, 0.05),
+    inset 0 0 2px 0 var(--white-12);
+  --elevation-2:
+    0 2px 6px 0 rgba(0, 0, 0, 0.08),
+    0 0 2px 1px rgba(0, 0, 0, 0.05),
+    inset 0 0 2px 0 var(--white-12);
+  --elevation-3:
+    0 4px 12px 0 rgba(0, 0, 0, 0.08),
+    0 0 2px 1px rgba(0, 0, 0, 0.05),
+    inset 0 0 2px 0 var(--white-12);
+  --elevation-4:
+    0 4px 24px 0 rgba(0, 0, 0, 0.08),
+    0 0 2px 1px rgba(0, 0, 0, 0.05),
+    inset 0 0 2px 0 var(--white-12);
+
+  /* ── 셰이프: 8~12 이 주력, 큰 컨테이너만 16~20 ── */
+  --radius-4: 4px;
+  --radius-6: 6px;
+  --radius-8: 8px;
+  --radius-10: 10px;
+  --radius-12: 12px;
+  --radius-16: 16px;
+  --radius-20: 20px;
+  --radius-pill: 999px;
+
+  /* ── 타이포: Inter + Noto Sans KR, 굵기는 400/700 두 단계뿐 ── */
+  --font-sans: "Inter", "Pretendard", "Noto Sans KR", -apple-system, BlinkMacSystemFont,
+    "Helvetica Neue", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400;
+  --weight-bold: 700;
+  --text-11: 11px;
+  --text-12: 12px;
+  --text-13: 13px;
+  --text-14: 14px;
+  --text-15: 15px;
+  --text-16: 16px;
+  --text-18: 18px;
+  --text-22: 22px;
+  --text-30: 30px;
+  --tracking-1: -0.01em; /* 15~17px */
+  --tracking-2: -0.04em; /* 22px↑ */
+
+  /* ── 밀도: 컨트롤 높이 한 스케일 ── */
+  --control-xs: 28px;
+  --control-m: 36px;
+  --control-l: 44px;
+
+  /* ── 모션: 짧고 가볍게 ── */
+  --easing: cubic-bezier(0.3, 0, 0, 1);
+  --transition-fast: 150ms var(--easing);
+  --transition-default: 300ms var(--easing);
+  --opacity-disabled: 0.4;
+
+  /* ── 레이어 ── */
+  --z-floating: 1;
+  --z-overlay: 1000;
+  --z-modal: 1100;
+  --z-toast: 1200;
+  --z-tooltip: 1300;
+}
+
+/* 레거시 별칭 — 셸/터미널 CSS 가 아직 옛 이름을 쓴다. 새 코드는 위 토큰만 쓴다. */
+:root {
+  --text: var(--fg);
+  --text-secondary: var(--fg-muted);
+  --text-faint: var(--fg-subtle);
+  --card: var(--surface);
+  --card-edge: var(--elevation-1);
+  --card-edge-hover: var(--elevation-2);
+  --lift: var(--elevation-1);
+  --lift-hover: var(--elevation-2);
+  --hover: var(--white-8);
+  --surface-strong: var(--surface-higher);
+  --surface-hover: var(--white-8);
+  --surface-raised: var(--surface-higher);
+  --radius: var(--radius-12);
+  --radius-sm: var(--radius-8);
+  --radius-card: var(--radius-12);
+  --radius-control: var(--radius-8);
+  --radius-hero: var(--radius-16);
+  --blue: var(--primary);
+  --night: var(--blue-300);
+  --panel: rgba(29, 29, 32, 0.94);
+  --text-title: var(--text-18);
+  --text-body: var(--text-14);
+  --text-label: var(--text-13);
+  --text-meta: var(--text-12);
+  --control-sm: var(--control-m);
+  --ease-spring: var(--easing);
+  --ease-pop: var(--easing);
+}

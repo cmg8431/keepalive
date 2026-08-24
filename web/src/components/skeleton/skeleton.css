@@ -1,0 +1,31 @@
+.sk {
+  display: block;
+  height: 12px;
+  margin: 8px 0;
+  border-radius: var(--radius-4);
+  background: linear-gradient(
+    100deg,
+    var(--white-8) 30%,
+    var(--white-12) 50%,
+    var(--white-8) 70%
+  );
+  background-size: 220% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.sk-card {
+  padding: 14px 13px;
+  border-radius: var(--radius-12);
+  background: var(--surface);
+}
+
+.sk-title {
+  width: 34%;
+  height: 10px;
+  margin-bottom: 12px;
+}
+
+@keyframes shimmer {
+  0% { background-position: 130% 0; }
+  100% { background-position: -30% 0; }
+}

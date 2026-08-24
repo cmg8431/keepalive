@@ -1,0 +1,140 @@
+/* 화면에서 색을 쓰는 유일한 면. 상태 하나를 색으로 말하고, 나머지는 중립 표면이다. */
+.hero {
+  position: relative;
+  padding: 16px;
+  border-radius: var(--radius-16);
+  overflow: hidden;
+  clip-path: inset(0 round var(--radius-16));
+  transform: translateZ(0);
+  isolation: isolate;
+  color: var(--white-100);
+  background: linear-gradient(142deg, #3b3d5c 0%, #2a2c3a 100%);
+  box-shadow: var(--elevation-2);
+  transition: background var(--transition-default);
+}
+
+
+/* 배경은 세 겹이다: 베이스 그라디언트 → 블러 먹인 컬러 블롭 → 그레인.
+   블롭은 blur 로 형태를 지우고, 그레인이 그 위에서 색 띠(banding)를 깬다. */
+.hero::before {
+  content: "";
+  position: absolute;
+  inset: -30%;
+  z-index: -2;
+  border-radius: inherit;
+  background:
+    radial-gradient(32% 38% at 24% 28%, rgba(128, 130, 255, 0.75), transparent 70%),
+    radial-gradient(30% 36% at 76% 18%, rgba(92, 173, 239, 0.6), transparent 72%),
+    radial-gradient(34% 40% at 62% 84%, rgba(64, 211, 197, 0.45), transparent 72%);
+  filter: blur(38px) saturate(130%);
+  animation: hero-drift 22s ease-in-out infinite alternate;
+}
+
+.hero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0.34;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 160px 160px;
+}
+
+.hero[data-tone="awake"]::before {
+  background:
+    radial-gradient(32% 38% at 22% 26%, rgba(81, 195, 113, 0.8), transparent 70%),
+    radial-gradient(30% 36% at 78% 18%, rgba(64, 211, 197, 0.6), transparent 72%),
+    radial-gradient(34% 42% at 60% 86%, rgba(92, 173, 239, 0.5), transparent 72%);
+}
+
+.hero[data-tone="cutout"]::before {
+  background:
+    radial-gradient(32% 38% at 24% 26%, rgba(247, 152, 71, 0.8), transparent 70%),
+    radial-gradient(30% 36% at 76% 20%, rgba(243, 104, 104, 0.6), transparent 72%),
+    radial-gradient(34% 40% at 62% 84%, rgba(240, 190, 39, 0.4), transparent 72%);
+}
+
+@keyframes hero-drift {
+  from { transform: translate3d(-2%, -1%, 0) scale(1.02); }
+  to { transform: translate3d(3%, 2%, 0) scale(1.1); }
+}
+
+.hero[data-tone="awake"] {
+  background: linear-gradient(142deg, #1f7a52 0%, #23566b 100%);
+}
+
+.hero[data-tone="cutout"] {
+  background: linear-gradient(142deg, #a2622a 0%, #6d3a3a 100%);
+}
+
+.hero-title {
+  margin-top: 14px;
+  font-size: var(--text-18);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-1);
+  color: var(--white-100);
+}
+
+.hero-detail {
+  margin-top: 3px;
+  font-size: var(--text-13);
+  color: var(--white-60);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hero-bottom {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.hero-value {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.hero-value strong {
+  font-size: var(--text-30);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-2);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.hero-value span {
+  font-size: var(--text-13);
+  color: var(--white-60);
+}
+
+.hero-dots {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-bottom: 4px;
+}
+
+.hero-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--white-20);
+  transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.hero-dots span[data-on="true"] {
+  background: var(--white-100);
+}
+
+.hero-dots .lead {
+  width: 14px;
+  height: 14px;
+  background: var(--white-100);
+}
