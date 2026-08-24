@@ -1,5 +1,6 @@
 use crate::clamshell;
 use crate::power::{self, SmcReader, WakeAssertion};
+use crate::sessions::SessionManager;
 use anyhow::{Context, Result};
 use keepalive_core::config::{Config, socket_path};
 use keepalive_core::policy::{self, CutoutKind, CutoutLatch, Decision, PolicyInput, SleepReason};
@@ -30,6 +31,17 @@ enum Request {
     Clear,
     Status,
     Shutdown,
+    Run {
+        dir: String,
+        #[serde(default)]
+        command: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    Sessions,
+    Kill {
+        name: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -62,6 +74,7 @@ struct Daemon {
     clamshell_ok: bool,
     clamshell_active: bool,
     clamshell_pushed_at: Option<Instant>,
+    managed: SessionManager,
 }
 
 const CLAMSHELL_REPUSH: Duration = Duration::from_secs(60);
@@ -88,6 +101,7 @@ impl Daemon {
             clamshell_ok,
             clamshell_active: false,
             clamshell_pushed_at: None,
+            managed: SessionManager::default(),
         }
     }
 
@@ -144,6 +158,16 @@ impl Daemon {
 
     fn tick(&mut self) {
         let now = Instant::now();
+        for event in self.managed.monitor(now) {
+            log(&event);
+        }
+        // Live managed sessions renew their wake holds every tick; the TTL
+        // is a backstop for daemon stalls, not the liveness signal.
+        let managed_ttl = Duration::from_secs((self.config.poll_secs * 4).max(60));
+        for name in self.managed.running() {
+            self.table
+                .acquire(&format!("managed:{name}"), "managed", managed_ttl, now);
+        }
         let pruned = self.table.prune_expired(now);
         if pruned > 0 {
             log(&format!("pruned {pruned} expired session(s)"));
@@ -222,6 +246,23 @@ impl Daemon {
                 serde_json::json!({ "ok": true })
             }
             Request::Shutdown => serde_json::json!({ "ok": true }),
+            Request::Run { dir, command, name } => {
+                let cmd = command.unwrap_or_else(|| "claude".to_string());
+                match self.managed.spawn(std::path::PathBuf::from(dir), cmd, name) {
+                    Ok(name) => serde_json::json!({ "ok": true, "name": name }),
+                    Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+                }
+            }
+            Request::Sessions => {
+                return serde_json::json!({ "ok": true, "managed": self.managed.list() });
+            }
+            Request::Kill { name } => match self.managed.kill(&name) {
+                Ok(found) => {
+                    self.table.release(&format!("managed:{name}"));
+                    serde_json::json!({ "ok": true, "found": found })
+                }
+                Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+            },
             Request::Status => {
                 let status = power::read_power_status();
                 let sessions = self

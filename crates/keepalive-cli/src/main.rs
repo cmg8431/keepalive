@@ -59,6 +59,21 @@ enum Commands {
     ClamshellSetup,
     /// Remove the passwordless pmset rule (run with sudo)
     ClamshellRemove,
+    /// Start an agent in a managed tmux session (survives disconnects, auto-revives)
+    Run {
+        /// Project directory (defaults to the current directory)
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+        /// Command to run (defaults to claude)
+        #[arg(long, default_value = "claude")]
+        cmd: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List managed sessions
+    Sessions,
+    /// Kill a managed session
+    Kill { name: String },
 }
 
 fn main() {
@@ -128,6 +143,43 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Uninstall => install::uninstall(),
         Commands::ClamshellSetup => clamshell_setup::setup(),
         Commands::ClamshellRemove => clamshell_setup::remove(),
+        Commands::Run { dir, cmd, name } => {
+            let dir = match dir {
+                Some(d) => d,
+                None => std::env::current_dir()?,
+            };
+            let dir = dir.canonicalize()?;
+            let res = client::request_autostart(&serde_json::json!({
+                "cmd": "run",
+                "dir": dir.to_string_lossy(),
+                "command": cmd,
+                "name": name,
+            }))?;
+            print_result(&res);
+            Ok(())
+        }
+        Commands::Sessions => {
+            let res = client::request(&serde_json::json!({ "cmd": "sessions" }))?;
+            println!("{}", serde_json::to_string_pretty(&res)?);
+            Ok(())
+        }
+        Commands::Kill { name } => {
+            let res = client::request(&serde_json::json!({ "cmd": "kill", "name": name }))?;
+            print_result(&res);
+            Ok(())
+        }
+    }
+}
+
+fn print_result(res: &serde_json::Value) {
+    if res["ok"].as_bool().unwrap_or(false) {
+        if let Some(name) = res["name"].as_str() {
+            println!("started managed session {name} (attach: tmux attach -t {name})");
+        } else {
+            println!("ok");
+        }
+    } else {
+        eprintln!("error: {}", res["error"].as_str().unwrap_or("unknown"));
     }
 }
 

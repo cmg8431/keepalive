@@ -1,6 +1,7 @@
 pub mod clamshell;
 mod power;
 mod server;
+mod sessions;
 
 use anyhow::Result;
 
