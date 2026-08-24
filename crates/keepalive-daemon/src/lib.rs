@@ -1,4 +1,5 @@
 pub mod clamshell;
+mod heartbeat;
 mod http;
 mod notify;
 mod power;

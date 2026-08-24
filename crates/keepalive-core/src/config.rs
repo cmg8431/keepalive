@@ -20,6 +20,10 @@ pub struct Config {
     pub web_port: u16,
     /// ntfy.sh topic for push notifications (empty = disabled).
     pub ntfy_topic: String,
+    /// While sleep is allowed, wake every N minutes to poll the ntfy topic
+    /// for a "wake" message from the phone (0 = disabled; needs ntfy_topic
+    /// and the clamshell sudoers rule).
+    pub heartbeat_minutes: u64,
     /// Directories the dashboard may spawn new agent sessions in.
     pub projects: Vec<String>,
 }
@@ -35,6 +39,7 @@ impl Default for Config {
             clamshell: true,
             web_port: 7757,
             ntfy_topic: String::new(),
+            heartbeat_minutes: 0,
             projects: Vec::new(),
         }
     }

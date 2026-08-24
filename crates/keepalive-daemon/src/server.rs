@@ -1,4 +1,5 @@
 use crate::clamshell;
+use crate::heartbeat::Heartbeat;
 use crate::notify;
 use crate::power::{self, SmcReader, WakeAssertion};
 use crate::sessions::{ManagedSessionInfo, SessionManager};
@@ -77,6 +78,8 @@ pub(crate) struct Daemon {
     clamshell_active: bool,
     clamshell_pushed_at: Option<Instant>,
     managed: SessionManager,
+    heartbeat: Option<Heartbeat>,
+    last_tick: Option<Instant>,
 }
 
 const CLAMSHELL_REPUSH: Duration = Duration::from_secs(60);
@@ -87,12 +90,21 @@ impl Daemon {
         if smc.is_none() {
             log("SMC unavailable — thermal cutout disabled");
         }
-        let clamshell_ok = config.clamshell && clamshell::passwordless_available();
+        let passwordless = clamshell::passwordless_available();
+        let clamshell_ok = config.clamshell && passwordless;
         if config.clamshell && !clamshell_ok {
             log(
                 "clamshell requested but passwordless pmset is not configured — run: sudo keepalive clamshell-setup (then restart the daemon)",
             );
         }
+        let heartbeat = if config.heartbeat_minutes > 0 && !passwordless {
+            log(
+                "heartbeat wake requested but pmset scheduling needs the sudoers rule — run: sudo keepalive clamshell-setup",
+            );
+            None
+        } else {
+            Heartbeat::new(config.heartbeat_minutes, &config.ntfy_topic)
+        };
         Self {
             config,
             table: SessionTable::default(),
@@ -104,6 +116,8 @@ impl Daemon {
             clamshell_active: false,
             clamshell_pushed_at: None,
             managed: SessionManager::default(),
+            heartbeat,
+            last_tick: None,
         }
     }
 
@@ -160,6 +174,26 @@ impl Daemon {
 
     fn tick(&mut self) {
         let now = Instant::now();
+        // A large gap between ticks means the machine slept: check whether
+        // the phone asked for a wake while we were gone.
+        let gap_threshold = Duration::from_secs(self.config.poll_secs.max(1) * 3 + 30);
+        let woke_from_sleep = self
+            .last_tick
+            .is_some_and(|t| now.saturating_duration_since(t) > gap_threshold);
+        self.last_tick = Some(now);
+        if woke_from_sleep && let Some(hb) = &self.heartbeat {
+            log("woke from sleep — polling wake mailbox");
+            if hb.wake_requested() {
+                self.table
+                    .acquire("remote-wake", "phone", Duration::from_secs(1800), now);
+                log("remote wake requested — holding 30 minutes");
+                notify::push(
+                    &self.config.ntfy_topic,
+                    "keepalive",
+                    "Mac is awake and holding for 30 minutes",
+                );
+            }
+        }
         for event in self.managed.monitor(now) {
             log(&event);
             notify::push(&self.config.ntfy_topic, "keepalive session", &event);
@@ -238,6 +272,14 @@ impl Daemon {
                             );
                         }
                     }
+                }
+                // About to let the machine sleep: make sure a heartbeat wake
+                // is on the calendar so the phone can still reach us.
+                if let Some(hb) = &mut self.heartbeat
+                    && let Err(e) = hb.ensure_scheduled(now)
+                {
+                    log(&format!("heartbeat scheduling failed, disabling: {e:#}"));
+                    self.heartbeat = None;
                 }
             }
         }
