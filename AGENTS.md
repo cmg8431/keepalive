@@ -18,6 +18,8 @@
 
 Never add Claude/AI attribution (`Co-Authored-By`, "Generated with", etc.) to commits or PRs.
 
+No em dashes or en dashes in commit messages, PR titles/bodies, or issue titles/bodies. Use a plain hyphen or split the sentence. Enforced by `githooks/commit-msg` (enable with `git config core.hooksPath githooks`).
+
 ## Architecture Overview
 
 keepalive is an **all-Rust cargo workspace**. One binary (`keepalive`) serves as daemon, client, and hook entrypoint.
