@@ -4,8 +4,10 @@ mod heartbeat;
 mod http;
 mod notify;
 mod power;
+mod projects;
 mod server;
 mod sessions;
+mod terminal;
 
 use anyhow::Result;
 

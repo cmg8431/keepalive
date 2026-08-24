@@ -14,7 +14,7 @@ use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tao::window::WindowBuilder;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
 const POLL: Duration = Duration::from_secs(5);
@@ -62,10 +62,25 @@ fn main() {
         .build(&window)
         .expect("failed to create webview");
 
+    // Right-click is the "I know what I want" path: the holds people actually
+    // reach for, plus the escape hatch, without opening the panel at all.
     let menu = Menu::new();
-    let open_browser = MenuItem::new("Open in browser", true, None);
+    let hold_30 = MenuItem::new("Keep awake 30 min", true, None);
+    let hold_1h = MenuItem::new("Keep awake 1 hour", true, None);
+    let hold_3h = MenuItem::new("Keep awake 3 hours", true, None);
+    let sleep_now = MenuItem::new("Let it sleep now", true, None);
+    let open_browser = MenuItem::new("Open dashboard in browser", true, None);
     let quit = MenuItem::new("Quit keepalive menu", true, None);
-    let _ = menu.append_items(&[&open_browser, &quit]);
+    let _ = menu.append_items(&[
+        &hold_30,
+        &hold_1h,
+        &hold_3h,
+        &PredefinedMenuItem::separator(),
+        &sleep_now,
+        &PredefinedMenuItem::separator(),
+        &open_browser,
+        &quit,
+    ]);
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -118,7 +133,21 @@ fn main() {
 
         while let Ok(event) = menu_events.try_recv() {
             let id = event.id();
-            if id == open_browser.id() {
+            let hold = [
+                (hold_30.id(), 30u64),
+                (hold_1h.id(), 60),
+                (hold_3h.id(), 180),
+            ]
+            .into_iter()
+            .find(|(menu_id, _)| id == menu_id)
+            .map(|(_, minutes)| minutes);
+            if let Some(minutes) = hold {
+                let _ = request(&serde_json::json!({ "cmd": "hold", "minutes": minutes }));
+                tray.set_title(Some(tray_title()));
+            } else if id == sleep_now.id() {
+                let _ = request(&serde_json::json!({ "cmd": "clear" }));
+                tray.set_title(Some(tray_title()));
+            } else if id == open_browser.id() {
                 let _ = std::process::Command::new("open")
                     .arg(format!("http://127.0.0.1:{web_port}/"))
                     .spawn();

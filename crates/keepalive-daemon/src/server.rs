@@ -24,6 +24,10 @@ pub(crate) enum Request {
         ttl_secs: Option<u64>,
         #[serde(default)]
         label: Option<String>,
+        /// Absolute cwd of the agent turn. Hooks run inside the project, so
+        /// this is how the dashboard's project list fills itself in.
+        #[serde(default)]
+        dir: Option<String>,
     },
     Release {
         id: String,
@@ -31,6 +35,9 @@ pub(crate) enum Request {
     Hold {
         #[serde(default)]
         minutes: Option<u64>,
+        /// 상한 가드까지 끄고 무기한 잡는다. 배터리·온도 가드는 그대로 산다.
+        #[serde(default)]
+        forever: bool,
     },
     Clear,
     Status,
@@ -47,6 +54,27 @@ pub(crate) enum Request {
         name: String,
     },
     Tail {
+        name: String,
+    },
+    SendText {
+        name: String,
+        text: String,
+    },
+    SendKey {
+        name: String,
+        key: String,
+    },
+    /// Raw keyboard bytes from the web terminal, hex-encoded.
+    Resize {
+        name: String,
+        cols: u16,
+        rows: u16,
+    },
+    SendRaw {
+        name: String,
+        hex: String,
+    },
+    Snapshot {
         name: String,
     },
 }
@@ -87,8 +115,11 @@ pub(crate) struct Daemon {
     clamshell_active: bool,
     clamshell_pushed_at: Option<Instant>,
     managed: SessionManager,
+    recents: crate::projects::Recents,
     heartbeat: Option<Heartbeat>,
     last_tick: Option<Instant>,
+    /// 무기한 홀드 동안 잠시 꺼둔 최대 유지 시간. 재우면 되돌린다.
+    saved_max_hold_hours: Option<u64>,
 }
 
 const CLAMSHELL_REPUSH: Duration = Duration::from_secs(60);
@@ -124,9 +155,18 @@ impl Daemon {
             clamshell_ok,
             clamshell_active: false,
             clamshell_pushed_at: None,
-            managed: SessionManager::default(),
+            managed: {
+                let mut m = SessionManager::default();
+                let adopted = m.adopt_existing();
+                if adopted > 0 {
+                    log(&format!("adopted {adopted} running session(s) from tmux"));
+                }
+                m
+            },
+            recents: crate::projects::Recents::load(),
             heartbeat,
             last_tick: None,
+            saved_max_hold_hours: None,
         }
     }
 
@@ -208,9 +248,18 @@ impl Daemon {
                 );
             }
         }
-        for event in self.managed.monitor(now) {
-            log(&event);
-            notify::push(&self.config.ntfy_topic, "keepalive session", &event);
+        let events = self.managed.monitor(now);
+        if !events.is_empty() {
+            let base = notify::dashboard_base(self.config.web_port);
+            for (name, event) in events {
+                log(&event);
+                notify::push_with_click(
+                    &self.config.ntfy_topic,
+                    "keepalive session",
+                    &event,
+                    base.as_ref().map(|b| format!("{b}/s/{name}")),
+                );
+            }
         }
         // Live managed sessions renew their wake holds every tick; the TTL
         // is a backstop for daemon stalls, not the liveness signal.
@@ -256,10 +305,11 @@ impl Daemon {
                 match reason {
                     SleepReason::NoActiveSessions => {
                         if was_awake {
-                            notify::push(
+                            notify::push_with_click(
                                 &topic,
                                 "keepalive",
                                 "Work finished — letting the Mac sleep",
+                                notify::dashboard_base(self.config.web_port),
                             );
                         }
                     }
@@ -308,6 +358,38 @@ impl Daemon {
         &self.config
     }
 
+    pub(crate) fn recents(&self) -> &crate::projects::Recents {
+        &self.recents
+    }
+
+    pub(crate) fn forget_recent(&mut self, dir: &str) -> bool {
+        self.recents.forget(dir)
+    }
+
+    /// Whether a name refers to a session this daemon manages — checked before
+    /// opening a terminal stream so an unknown name fails as a plain error
+    /// rather than an endless stream of failures.
+    pub(crate) fn manages(&self, name: &str) -> bool {
+        self.managed.snapshot(name).is_ok()
+    }
+
+    /// 무기한 홀드를 위해 최대 유지 시간 가드를 끈다. 원래 값을 기억해 뒀다가
+    /// 재울 때 되돌리므로, 가드가 영구히 사라지는 일은 없다.
+    fn suspend_max_hold(&mut self) {
+        if self.config.max_hold_hours > 0 {
+            self.saved_max_hold_hours = Some(self.config.max_hold_hours);
+            self.config.max_hold_hours = 0;
+            log("max-hold guard suspended for an unlimited hold");
+        }
+    }
+
+    fn restore_max_hold(&mut self) {
+        if let Some(hours) = self.saved_max_hold_hours.take() {
+            self.config.max_hold_hours = hours;
+            log("max-hold guard restored");
+        }
+    }
+
     /// Live-apply a changed config (setup wizard): notification topic and
     /// heartbeat take effect without a daemon restart.
     pub(crate) fn reload_config(&mut self, config: Config) {
@@ -338,29 +420,44 @@ impl Daemon {
                 source,
                 ttl_secs,
                 label,
+                dir,
             } => {
                 let ttl = ttl_secs.map_or(self.config.default_ttl(), Duration::from_secs);
                 let source = source.unwrap_or_else(|| "unknown".to_string());
                 self.table.acquire(&id, &source, label.as_deref(), ttl, now);
+                if let Some(dir) = dir {
+                    self.recents.record(&dir, &source);
+                }
                 serde_json::json!({ "ok": true })
             }
             Request::Release { id } => {
                 let released = self.table.release(&id);
                 serde_json::json!({ "ok": true, "released": released })
             }
-            Request::Hold { minutes } => {
-                let ttl = Duration::from_secs(minutes.unwrap_or(60) * 60);
+            Request::Hold { minutes, forever } => {
+                if forever {
+                    self.suspend_max_hold();
+                }
+                let ttl = if forever {
+                    Duration::from_secs(365 * 24 * 3600)
+                } else {
+                    Duration::from_secs(minutes.unwrap_or(60) * 60)
+                };
                 self.table
                     .acquire("manual", "manual", Some("manual hold"), ttl, now);
-                serde_json::json!({ "ok": true })
+                serde_json::json!({ "ok": true, "forever": forever })
             }
             Request::Clear => {
+                self.restore_max_hold();
                 self.table.clear();
                 serde_json::json!({ "ok": true })
             }
             Request::Shutdown => serde_json::json!({ "ok": true }),
             Request::Run { dir, command, name } => {
                 let cmd = command.unwrap_or_else(|| "claude".to_string());
+                // A directory you deliberately started a session in belongs in
+                // the project list just as much as one a hook reported.
+                self.recents.record(&dir, "session");
                 match self.managed.spawn(std::path::PathBuf::from(dir), cmd, name) {
                     Ok(name) => serde_json::json!({ "ok": true, "name": name }),
                     Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
@@ -372,6 +469,40 @@ impl Daemon {
             Request::Tail { name } => {
                 return match self.managed.tail(&name) {
                     Ok(output) => serde_json::json!({ "ok": true, "output": output }),
+                    Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+                };
+            }
+            Request::SendText { name, text } => {
+                return match self.managed.send_text(&name, &text) {
+                    Ok(()) => serde_json::json!({ "ok": true }),
+                    Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+                };
+            }
+            Request::SendKey { name, key } => {
+                return match self.managed.send_key(&name, &key) {
+                    Ok(()) => serde_json::json!({ "ok": true }),
+                    Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+                };
+            }
+            Request::Resize { name, cols, rows } => {
+                return match self.managed.resize(&name, cols, rows) {
+                    Ok(()) => serde_json::json!({ "ok": true }),
+                    Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+                };
+            }
+            Request::SendRaw { name, hex } => {
+                let Some(bytes) = decode_hex(&hex) else {
+                    return serde_json::json!({ "ok": false, "error": "malformed input" });
+                };
+                return match self.managed.send_raw(&name, &bytes) {
+                    Ok(()) => serde_json::json!({ "ok": true }),
+                    Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+                };
+            }
+            Request::Snapshot { name } => {
+                return match self.managed.snapshot(&name) {
+                    Ok(snap) => serde_json::to_value(snap)
+                        .unwrap_or_else(|_| serde_json::json!({ "ok": false })),
                     Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
                 };
             }
@@ -417,6 +548,18 @@ impl Daemon {
         self.tick();
         response
     }
+}
+
+/// Rejects anything that is not clean hex, so a malformed payload can never
+/// reach tmux as a partially-decoded key sequence.
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) || hex.len() > 4096 {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect()
 }
 
 /// Everything worth logging is also worth showing in the dashboard's

@@ -46,11 +46,15 @@ pub struct SessionManager {
 
 /// launchd starts the daemon with a minimal PATH, so Homebrew's tmux has to
 /// be found by absolute path rather than lookup.
-fn tmux_bin() -> &'static str {
-    ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
-        .into_iter()
-        .find(|p| std::path::Path::new(p).exists())
-        .unwrap_or("tmux")
+pub fn tmux_bin() -> &'static str {
+    [
+        "/opt/homebrew/bin/tmux",
+        "/usr/local/bin/tmux",
+        "/usr/bin/tmux",
+    ]
+    .into_iter()
+    .find(|p| std::path::Path::new(p).exists())
+    .unwrap_or("tmux")
 }
 
 fn tmux(args: &[&str]) -> Result<std::process::Output> {
@@ -96,6 +100,52 @@ fn revival_cmd(cmd: &str) -> String {
 }
 
 impl SessionManager {
+    /// Re-adopt `ka-*` tmux sessions that outlived the daemon.
+    ///
+    /// The manager only lives in memory, so a daemon restart used to orphan
+    /// every running agent: tmux kept them alive but the dashboard could no
+    /// longer show or open them. Reconciling at startup keeps the promise that
+    /// these sessions survive anything short of the machine going down.
+    pub fn adopt_existing(&mut self) -> usize {
+        let Ok(out) = tmux(&[
+            "list-sessions",
+            "-F",
+            "#{session_name}|#{pane_current_path}",
+        ]) else {
+            return 0;
+        };
+        if !out.status.success() {
+            return 0;
+        }
+        let mut adopted = 0;
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let (name, dir) = line.split_once('|').unwrap_or((line, ""));
+            let Some(suffix) = name.strip_prefix("ka-") else {
+                continue;
+            };
+            if self.sessions.contains_key(name) {
+                continue;
+            }
+            if let Ok(n) = suffix.parse::<u32>() {
+                self.counter = self.counter.max(n);
+            }
+            self.sessions.insert(
+                name.to_string(),
+                ManagedSession {
+                    dir: PathBuf::from(if dir.is_empty() { "/" } else { dir }),
+                    // The original command is gone with the old daemon; revival
+                    // uses the same default the spawn path does.
+                    cmd: "claude".to_string(),
+                    status: SessionStatus::Running,
+                    respawn_count: 0,
+                    spawned_at: Instant::now(),
+                },
+            );
+            adopted += 1;
+        }
+        adopted
+    }
+
     pub fn spawn(&mut self, dir: PathBuf, cmd: String, name: Option<String>) -> Result<String> {
         if !dir.is_dir() {
             bail!("not a directory: {}", dir.display());
@@ -128,9 +178,7 @@ impl SessionManager {
     /// what the agent is doing. Only sessions this manager spawned are
     /// readable — arbitrary tmux targets stay out of reach of the dashboard.
     pub fn tail(&self, name: &str) -> Result<String> {
-        if !self.sessions.contains_key(name) {
-            bail!("unknown session: {name}");
-        }
+        self.assert_known(name)?;
         // capture-pane takes a pane target: "=name:" is the exact-matched
         // session's active window/pane (bare "=name" is not a valid pane ref).
         let target = format!("={name}:");
@@ -150,6 +198,170 @@ impl SessionManager {
         Ok(lines[start..].join("\n"))
     }
 
+    /// Every remote-control entry point funnels through this: the dashboard
+    /// may only ever address sessions this manager spawned, never an arbitrary
+    /// tmux target that happens to exist on the machine.
+    fn assert_known(&self, name: &str) -> Result<()> {
+        if !self.sessions.contains_key(name) {
+            bail!("unknown session: {name}");
+        }
+        Ok(())
+    }
+
+    /// Type into a running agent from the phone. `text` is sent literally
+    /// (`-l`), so a payload can never be reinterpreted as a tmux key name;
+    /// named keys go through [`Self::send_key`] instead.
+    pub fn send_text(&self, name: &str, text: &str) -> Result<()> {
+        self.assert_known(name)?;
+        let target = format!("={name}:");
+        let out = tmux(&["send-keys", "-t", &target, "-l", "--", text])?;
+        if !out.status.success() {
+            bail!(
+                "tmux send-keys failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    /// Named keys the phone keyboard cannot produce (Enter, Escape, arrows,
+    /// C-c). Restricted to a fixed vocabulary so the dashboard can never pass
+    /// through an arbitrary tmux key spec.
+    pub fn send_key(&self, name: &str, key: &str) -> Result<()> {
+        self.assert_known(name)?;
+        const ALLOWED: &[&str] = &[
+            "Enter", "Escape", "Tab", "Space", "BSpace", "Up", "Down", "Left", "Right", "C-c",
+            "C-d", "C-r", "C-u", "C-l",
+        ];
+        if !ALLOWED.contains(&key) {
+            bail!("unsupported key: {key}");
+        }
+        let target = format!("={name}:");
+        let out = tmux(&["send-keys", "-t", &target, key])?;
+        if !out.status.success() {
+            bail!(
+                "tmux send-keys failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    /// One frame of a session's screen: the rendered pane plus where the
+    /// cursor sits, which is everything the browser needs to redraw it.
+    ///
+    /// This is deliberately *not* a tmux client. Attaching a real client
+    /// (`tmux attach` on a PTY, even into a grouped session) was measured to
+    /// take the entire tmux server down with it when the client goes away —
+    /// killing every agent session on the machine, which is the exact opposite
+    /// of what this daemon exists to do. Polling the pane can't: `capture-pane`
+    /// and `send-keys` are read/write operations on a session, never a client.
+    pub fn snapshot(&self, name: &str) -> Result<Snapshot> {
+        self.assert_known(name)?;
+        let target = format!("={name}:");
+        // -e keeps colour/attribute escapes. No -J: joining wrapped rows makes
+        // lines longer than the pane, and the viewer then wraps them somewhere
+        // else — the screen has to arrive exactly as tmux drew it, row by row.
+        let out = tmux(&["capture-pane", "-p", "-e", "-t", &target])?;
+        if !out.status.success() {
+            bail!(
+                "tmux capture-pane failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        // capture-pane separates rows with a bare LF. A terminal treats that as
+        // "down one row, keep the column", so every row would start where the
+        // previous one ended — the staircase. Rows need an explicit CR.
+        let screen = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let meta = tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            &target,
+            "#{cursor_x},#{cursor_y},#{pane_width},#{pane_height}",
+        ])?;
+        let meta = String::from_utf8_lossy(&meta.stdout);
+        let mut parts = meta.trim().split(',').map(|v| v.parse().unwrap_or(0));
+        Ok(Snapshot {
+            screen,
+            cursor_x: parts.next().unwrap_or(0),
+            cursor_y: parts.next().unwrap_or(0),
+            cols: parts.next().unwrap_or(80).max(1),
+            rows: parts.next().unwrap_or(24).max(1),
+        })
+    }
+
+    /// Forwards raw bytes from the browser's keyboard, hex-encoded so arrow
+    /// keys, control characters and UTF-8 all survive the trip intact.
+    /// Match the tmux window to the viewer's terminal. Without this the pane
+    /// keeps whatever geometry it was born with and the browser renders a
+    /// differently-wrapped copy of the same screen — the "broken" look.
+    pub fn resize(&self, name: &str, cols: u16, rows: u16) -> Result<()> {
+        self.assert_known(name)?;
+        // A viewer must never reshape a window someone is sitting in front of:
+        // resizing an attached session changes what the person at the real
+        // terminal sees. Detached sessions have no such owner, so those we size.
+        if self.attached(name) {
+            return Ok(());
+        }
+        let cols = cols.clamp(20, 500);
+        let rows = rows.clamp(5, 200);
+        let target = format!("={name}:");
+        let out = tmux(&[
+            "resize-window",
+            "-t",
+            &target,
+            "-x",
+            &cols.to_string(),
+            "-y",
+            &rows.to_string(),
+        ])?;
+        if !out.status.success() {
+            bail!(
+                "tmux resize-window failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether a real tmux client is looking at this session right now.
+    fn attached(&self, name: &str) -> bool {
+        let target = format!("={name}:");
+        tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            &target,
+            "#{session_attached}",
+        ])
+        .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() != "0")
+    }
+
+    pub fn send_raw(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.assert_known(name)?;
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let target = format!("={name}:");
+        let mut args = vec!["send-keys".to_string(), "-H".to_string()];
+        args.push("-t".to_string());
+        args.push(target);
+        args.extend(bytes.iter().map(|b| format!("{b:02x}")));
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = tmux(&borrowed)?;
+        if !out.status.success() {
+            bail!(
+                "tmux send-keys failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
     pub fn kill(&mut self, name: &str) -> Result<bool> {
         let existed = self.sessions.remove(name).is_some();
         if tmux_alive(name) {
@@ -160,8 +372,10 @@ impl SessionManager {
         Ok(existed)
     }
 
-    /// Returns log lines describing what changed this tick.
-    pub fn monitor(&mut self, now: Instant) -> Vec<String> {
+    /// Returns `(session name, log line)` for everything that changed this
+    /// tick. The name travels with the message so a notification can link
+    /// straight to the session it is about.
+    pub fn monitor(&mut self, now: Instant) -> Vec<(String, String)> {
         let mut events = Vec::new();
         for (name, session) in &mut self.sessions {
             if session.status != SessionStatus::Running {
@@ -175,8 +389,11 @@ impl SessionManager {
             }
             if session.respawn_count >= MAX_RESPAWNS {
                 session.status = SessionStatus::Abandoned;
-                events.push(format!(
-                    "session {name} died {MAX_RESPAWNS} times — abandoned (kill it to clean up)"
+                events.push((
+                    name.clone(),
+                    format!(
+                        "session {name} died {MAX_RESPAWNS} times — abandoned (kill it to clean up)"
+                    ),
                 ));
                 continue;
             }
@@ -185,14 +402,20 @@ impl SessionManager {
                 Ok(()) => {
                     session.respawn_count += 1;
                     session.spawned_at = now;
-                    events.push(format!(
-                        "session {name} died — revived with `{cmd}` (attempt {}/{MAX_RESPAWNS})",
-                        session.respawn_count
+                    events.push((
+                        name.clone(),
+                        format!(
+                            "session {name} died — revived with `{cmd}` (attempt {}/{MAX_RESPAWNS})",
+                            session.respawn_count
+                        ),
                     ));
                 }
                 Err(e) => {
                     session.status = SessionStatus::Abandoned;
-                    events.push(format!("session {name} revival failed: {e:#}"));
+                    events.push((
+                        name.clone(),
+                        format!("session {name} revival failed: {e:#}"),
+                    ));
                 }
             }
         }
@@ -220,6 +443,15 @@ impl SessionManager {
             })
             .collect()
     }
+}
+
+#[derive(Serialize, PartialEq, Eq, Clone)]
+pub struct Snapshot {
+    pub screen: String,
+    pub cursor_x: u16,
+    pub cursor_y: u16,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 #[cfg(test)]

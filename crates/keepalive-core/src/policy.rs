@@ -44,7 +44,8 @@ pub fn evaluate(config: &Config, input: &PolicyInput) -> Decision {
     {
         return Decision::AllowSleep(SleepReason::BatteryBelowFloor(pct));
     }
-    if input.held_for >= config.max_hold() {
+    // 0 = 상한 없음. 사용자가 명시적으로 끈 경우이며, 배터리·온도 가드는 그대로 산다.
+    if config.max_hold_hours > 0 && input.held_for >= config.max_hold() {
         return Decision::AllowSleep(SleepReason::MaxHoldExceeded);
     }
     Decision::StayAwake
@@ -255,5 +256,28 @@ mod tests {
             evaluate(&Config::default(), &i),
             Decision::AllowSleep(SleepReason::MaxHoldExceeded)
         );
+    }
+}
+
+#[cfg(test)]
+mod unlimited_hold_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn max_hold_zero_disables_cap() {
+        let config = Config {
+            max_hold_hours: 0,
+            ..Config::default()
+        };
+        let input = PolicyInput {
+            active_sessions: 1,
+            battery_percent: Some(90),
+            on_ac_power: true,
+            held_for: Duration::from_secs(60 * 60 * 100),
+            temperature_celsius: Some(50.0),
+            lid_closed: false,
+        };
+        assert_eq!(evaluate(&config, &input), Decision::StayAwake);
     }
 }

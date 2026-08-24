@@ -120,13 +120,17 @@ fn run(cli: Cli) -> Result<()> {
             from_hook,
             tool,
         } => {
-            let (id, source, label) = resolve_session(id, source, tool, from_hook)?;
-            let mut req = serde_json::json!({ "cmd": "acquire", "id": id, "source": source });
+            let hook = resolve_session(id, source, tool, from_hook)?;
+            let mut req =
+                serde_json::json!({ "cmd": "acquire", "id": hook.id, "source": hook.source });
             if let Some(ttl) = ttl_secs {
                 req["ttl_secs"] = ttl.into();
             }
-            if let Some(label) = label {
+            if let Some(label) = hook.label {
                 req["label"] = label.into();
+            }
+            if let Some(dir) = hook.dir {
+                req["dir"] = dir.into();
             }
             client::request_autostart(&req)?;
             Ok(())
@@ -136,8 +140,8 @@ fn run(cli: Cli) -> Result<()> {
             from_hook,
             tool,
         } => {
-            let (id, _, _) = resolve_session(id, String::new(), tool, from_hook)?;
-            client::request(&serde_json::json!({ "cmd": "release", "id": id }))?;
+            let hook = resolve_session(id, String::new(), tool, from_hook)?;
+            client::request(&serde_json::json!({ "cmd": "release", "id": hook.id }))?;
             Ok(())
         }
         Commands::Hold { minutes } => {
@@ -205,12 +209,22 @@ fn print_result(res: &serde_json::Value) {
     }
 }
 
+struct HookSession {
+    id: String,
+    source: String,
+    /// Project directory name, so a UUID never has to stand alone in the UI.
+    label: Option<String>,
+    /// Full project path, which the daemon turns into the dashboard's
+    /// project list — no hand-edited allowlist required.
+    dir: Option<String>,
+}
+
 fn resolve_session(
     id: Option<String>,
     source: String,
     tool: Option<String>,
     from_hook: bool,
-) -> Result<(String, String, Option<String>)> {
+) -> Result<HookSession> {
     if from_hook {
         let tool = tool.unwrap_or_else(|| "claude-code".to_string());
         let mut input = String::new();
@@ -222,20 +236,35 @@ fn resolve_session(
             .as_ref()
             .and_then(|p| p["session_id"].as_str().map(str::to_string))
             .unwrap_or_else(|| format!("{tool}-session"));
-        // The project directory name is what makes the hold recognizable
-        // in the dashboard, so a UUID never has to stand alone.
-        let label = payload
+        // Not every agent reports a cwd; the hook still runs in the project
+        // directory, so the process cwd is a sound fallback.
+        let dir = payload
             .as_ref()
-            .and_then(|p| p["cwd"].as_str())
-            .and_then(|cwd| {
-                std::path::Path::new(cwd)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
+            .and_then(|p| p["cwd"].as_str().map(str::to_string))
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|d| d.to_string_lossy().into_owned())
             });
-        return Ok((id, tool, label));
+        let label = dir.as_deref().and_then(|cwd| {
+            std::path::Path::new(cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        });
+        return Ok(HookSession {
+            id,
+            source: tool,
+            label,
+            dir,
+        });
     }
     let id = id.ok_or_else(|| anyhow::anyhow!("--id is required (or use --from-hook)"))?;
-    Ok((id, source, None))
+    Ok(HookSession {
+        id,
+        source,
+        label: None,
+        dir: None,
+    })
 }
 
 fn print_hooks_snippet() {

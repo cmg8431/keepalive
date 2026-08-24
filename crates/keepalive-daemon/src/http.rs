@@ -3,7 +3,7 @@
 //! is the authentication boundary (the tailnet is the user's private network).
 
 use crate::server::{Daemon, Request};
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -37,10 +37,20 @@ pub async fn serve_http(daemon: Arc<Mutex<Daemon>>, config: Config) {
         .route("/api/spawn", post(api_spawn))
         .route("/api/kill", post(api_kill))
         .route("/api/tail", post(api_tail))
+        .route("/api/send", post(api_send))
+        .route("/api/terminal/{name}/stream", get(api_terminal_stream))
+        .route("/api/terminal/{name}/input", post(api_terminal_input))
+        .route("/api/terminal/{name}/resize", post(api_terminal_resize))
+        .route("/api/projects", get(api_projects))
+        .route("/api/projects/add", post(api_projects_add))
+        .route("/api/projects/remove", post(api_projects_remove))
+        .route("/api/browse", get(api_browse))
         .route("/api/notify-test", post(api_notify_test))
+        .route("/api/open-browser", post(api_open_browser))
         .route("/api/setup", get(api_setup))
         .route("/api/setup/provider", post(api_setup_provider))
         .route("/api/setup/ntfy", post(api_setup_ntfy))
+        .route("/api/setup/https", post(api_setup_https))
         .fallback(static_assets)
         .with_state(state);
 
@@ -95,23 +105,69 @@ fn random_topic() -> String {
     format!("keepalive-{hex}")
 }
 
+/// The menu bar panel has no address bar, so it asks the daemon to hand the
+/// dashboard to the real browser.
+async fn api_open_browser(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let port = state.daemon.lock().unwrap().config().web_port;
+    let _ = std::process::Command::new("open")
+        .arg(format!("http://127.0.0.1:{port}/"))
+        .spawn();
+    Json(serde_json::json!({ "ok": true }))
+}
+
 async fn api_setup(State(state): State<AppState>) -> Json<serde_json::Value> {
     let config = state.daemon.lock().unwrap().config().clone();
     let ts_ip = crate::connect::tailscale_ip();
-    let dashboard_url = ts_ip.map(|ip| format!("http://{ip}:{}", config.web_port));
+    let magic_dns = crate::connect::magic_dns_name();
+    let https_on = crate::connect::https_active(config.web_port);
+    // Best address first: a certificate-backed name beats a MagicDNS name with
+    // a port, which beats a raw IP. The QR encodes whichever one applies, so
+    // pointing a phone camera at it is always the shortest path in.
+    let dashboard_url = match (&magic_dns, ts_ip) {
+        (Some(name), _) if https_on => Some(format!("https://{name}")),
+        (Some(name), _) => Some(format!("http://{name}:{}", config.web_port)),
+        (None, Some(ip)) => Some(format!("http://{ip}:{}", config.web_port)),
+        (None, None) => None,
+    };
     let ntfy_url =
         (!config.ntfy_topic.is_empty()).then(|| format!("https://ntfy.sh/{}", config.ntfy_topic));
     Json(serde_json::json!({
         "ok": true,
         "providers": crate::connect::providers(),
+        "hooks": crate::connect::hooked_agents(),
+        "projects": config.projects,
         "ntfy_topic": config.ntfy_topic,
         "heartbeat_minutes": config.heartbeat_minutes,
         "clamshell_ready": crate::clamshell::passwordless_available(),
         "dashboard_url": dashboard_url,
         "dashboard_qr": dashboard_url.as_deref().and_then(qr_svg),
+        "magic_dns": magic_dns,
+        "https_enabled": https_on,
         "ntfy_url": ntfy_url,
         "ntfy_qr": ntfy_url.as_deref().and_then(qr_svg),
     }))
+}
+
+#[derive(Deserialize)]
+struct HttpsBody {
+    enable: bool,
+}
+
+async fn api_setup_https(
+    State(state): State<AppState>,
+    Json(body): Json<HttpsBody>,
+) -> Json<serde_json::Value> {
+    let port = state.daemon.lock().unwrap().config().web_port;
+    if !body.enable {
+        return match crate::connect::disable_https(port) {
+            Ok(()) => Json(serde_json::json!({ "ok": true })),
+            Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+        };
+    }
+    match crate::connect::enable_https(port) {
+        Ok(url) => Json(serde_json::json!({ "ok": true, "url": url })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
 }
 
 #[derive(Deserialize)]
@@ -194,6 +250,8 @@ async fn api_events(
 struct HoldBody {
     #[serde(default)]
     minutes: Option<u64>,
+    #[serde(default)]
+    forever: bool,
 }
 
 async fn api_hold(
@@ -204,6 +262,7 @@ async fn api_hold(
         &state,
         Request::Hold {
             minutes: body.minutes,
+            forever: body.forever,
         },
     ))
 }
@@ -231,23 +290,18 @@ struct SpawnBody {
     name: Option<String>,
 }
 
-/// Remote spawning is an RCE surface by construction, so it is triply
-/// constrained: tailnet-only reachability, an explicit directory allowlist,
-/// and a fixed command — the dashboard can only ever start `claude`.
+/// Remote spawning is an RCE surface by construction, so it stays triply
+/// constrained: tailnet-only reachability, a known-projects check, and a fixed
+/// command — the dashboard can only ever start `claude`.
+///
+/// "Known" is the config allowlist plus directories an agent has already run
+/// in (learned from hooks). The learned half is what makes the phone usable
+/// out of the box, and it grants nothing new: those are directories where the
+/// same agent already ran under the same user.
 async fn api_spawn(
     State(state): State<AppState>,
     Json(body): Json<SpawnBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let projects = state.daemon.lock().unwrap().config().projects.clone();
-    if projects.is_empty() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": "no allowlisted projects — add `projects = [\"/path/to/repo\"]` to the config"
-            })),
-        );
-    }
     let requested = std::path::Path::new(&body.dir);
     let Ok(canonical) = requested.canonicalize() else {
         return (
@@ -255,15 +309,17 @@ async fn api_spawn(
             Json(serde_json::json!({ "ok": false, "error": "directory does not exist" })),
         );
     };
-    let allowed = projects.iter().any(|p| {
-        std::path::Path::new(p)
-            .canonicalize()
-            .is_ok_and(|allow| canonical.starts_with(allow))
-    });
+    let allowed = {
+        let daemon = state.daemon.lock().unwrap();
+        crate::projects::is_allowed(&daemon.config().projects, daemon.recents(), &canonical)
+    };
     if !allowed {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "ok": false, "error": "directory is not in the allowlist" })),
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "unknown project — add it from Projects first"
+            })),
         );
     }
     let res = ask(
@@ -275,6 +331,184 @@ async fn api_spawn(
         },
     );
     (StatusCode::OK, Json(res))
+}
+
+#[derive(Deserialize)]
+struct SendBody {
+    name: String,
+    /// Literal text to type. Mutually usable with `key`; text goes first.
+    #[serde(default)]
+    text: Option<String>,
+    /// A named key from the fixed vocabulary (Enter, Escape, C-c, ...).
+    #[serde(default)]
+    key: Option<String>,
+}
+
+/// Answering the agent without a full terminal: the quick-reply bar and the
+/// "type a message" field both land here.
+async fn api_send(
+    State(state): State<AppState>,
+    Json(body): Json<SendBody>,
+) -> Json<serde_json::Value> {
+    if let Some(text) = body.text.filter(|t| !t.is_empty()) {
+        let res = ask(
+            &state,
+            Request::SendText {
+                name: body.name.clone(),
+                text,
+            },
+        );
+        if !res["ok"].as_bool().unwrap_or(false) {
+            return Json(res);
+        }
+    }
+    match body.key.filter(|k| !k.is_empty()) {
+        Some(key) => Json(ask(
+            &state,
+            Request::SendKey {
+                name: body.name,
+                key,
+            },
+        )),
+        None => Json(serde_json::json!({ "ok": true })),
+    }
+}
+
+/// Streams the session's screen as it changes. Unknown names fail up front so
+/// the browser gets a readable error instead of an event stream of failures.
+async fn api_terminal_stream(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> axum::response::Response {
+    if !state.daemon.lock().unwrap().manages(&name) {
+        return (StatusCode::NOT_FOUND, format!("unknown session: {name}")).into_response();
+    }
+    let daemon = Arc::clone(&state.daemon);
+    let mut last: Option<serde_json::Value> = None;
+    let stream = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(
+        crate::terminal::FRAME_INTERVAL,
+    ))
+    .filter_map(move |_| {
+        crate::terminal::next_frame(&daemon, &name, &mut last).map(|frame| {
+            Ok::<Event, std::convert::Infallible>(Event::default().data(frame.to_string()))
+        })
+    });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct TerminalInput {
+    /// Hex-encoded keyboard bytes, so control and escape sequences survive.
+    hex: String,
+}
+
+async fn api_terminal_input(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<TerminalInput>,
+) -> Json<serde_json::Value> {
+    Json(ask(
+        &state,
+        Request::SendRaw {
+            name,
+            hex: body.hex,
+        },
+    ))
+}
+
+#[derive(Deserialize)]
+struct TerminalSize {
+    cols: u16,
+    rows: u16,
+}
+
+async fn api_terminal_resize(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<TerminalSize>,
+) -> Json<serde_json::Value> {
+    Json(ask(
+        &state,
+        Request::Resize {
+            name,
+            cols: body.cols,
+            rows: body.rows,
+        },
+    ))
+}
+
+async fn api_projects(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let daemon = state.daemon.lock().unwrap();
+    Json(serde_json::json!({
+        "ok": true,
+        "allowlist": daemon.config().projects,
+        "recent": daemon.recents().list(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct ProjectBody {
+    dir: String,
+}
+
+/// Pins a directory into the config allowlist, so it survives even after it
+/// ages out of the learned list.
+async fn api_projects_add(
+    State(state): State<AppState>,
+    Json(body): Json<ProjectBody>,
+) -> Json<serde_json::Value> {
+    let Ok(canonical) = std::path::Path::new(&body.dir).canonicalize() else {
+        return Json(serde_json::json!({ "ok": false, "error": "directory does not exist" }));
+    };
+    if !canonical.is_dir() {
+        return Json(serde_json::json!({ "ok": false, "error": "not a directory" }));
+    }
+    let dir = canonical.to_string_lossy().into_owned();
+    let mut config = state.daemon.lock().unwrap().config().clone();
+    if !config.projects.contains(&dir) {
+        config.projects.push(dir.clone());
+    }
+    if let Err(e) = config.save() {
+        return Json(serde_json::json!({ "ok": false, "error": format!("saving config: {e}") }));
+    }
+    state.daemon.lock().unwrap().reload_config(config);
+    Json(serde_json::json!({ "ok": true, "dir": dir }))
+}
+
+async fn api_projects_remove(
+    State(state): State<AppState>,
+    Json(body): Json<ProjectBody>,
+) -> Json<serde_json::Value> {
+    let mut config = state.daemon.lock().unwrap().config().clone();
+    config.projects.retain(|p| p != &body.dir);
+    if let Err(e) = config.save() {
+        return Json(serde_json::json!({ "ok": false, "error": format!("saving config: {e}") }));
+    }
+    let mut daemon = state.daemon.lock().unwrap();
+    daemon.reload_config(config);
+    // Also drop it from the learned list, or it would immediately reappear as
+    // a spawnable project and the removal would look like it did nothing.
+    daemon.forget_recent(&body.dir);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct BrowseQuery {
+    #[serde(default)]
+    path: Option<String>,
+}
+
+async fn api_browse(Query(q): Query<BrowseQuery>) -> Json<serde_json::Value> {
+    match crate::projects::browse(q.path.as_deref()) {
+        Ok(browse) => {
+            let mut value = serde_json::to_value(browse).unwrap_or_default();
+            value["ok"] = serde_json::json!(true);
+            Json(value)
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
 }
 
 #[derive(Deserialize)]
