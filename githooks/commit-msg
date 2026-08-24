@@ -1,6 +1,6 @@
 #!/bin/sh
 # Reject commit messages containing em/en dashes (see AGENTS.md conventions).
-if grep -qE "\xe2\x80\x93|\xe2\x80\x94" "$1"; then
+if grep -q '—\|–' "$1"; then
     echo "commit-msg: em/en dashes are not allowed in commit messages; use a plain hyphen." >&2
     exit 1
 fi
