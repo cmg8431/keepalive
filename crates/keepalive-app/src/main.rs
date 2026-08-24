@@ -105,11 +105,11 @@ fn main() {
     event_loop.run(move |_event, _target, control_flow| {
         if Instant::now() >= next_poll {
             let view = read_state();
-            let _ = tray.set_title(Some(view.title));
+            tray.set_title(Some(view.title));
             status_line.set_text(view.detail);
             next_poll = Instant::now() + POLL;
         }
-        *control_flow = ControlFlow::WaitUntil(next_poll.into());
+        *control_flow = ControlFlow::WaitUntil(next_poll);
 
         while let Ok(event) = menu_events.try_recv() {
             let id = event.id();
