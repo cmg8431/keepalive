@@ -26,7 +26,12 @@ type Status = {
   lid_closed: boolean;
   cutout_latched: boolean;
   clamshell_active: boolean;
+  held_for_secs: number | null;
+  activity: { t: number; text: string }[];
   projects: string[];
+  battery_floor_percent: number;
+  thermal_threshold_celsius: number;
+  max_hold_hours: number;
 };
 type ProviderState =
   | "not_installed"
@@ -69,8 +74,17 @@ export default function App() {
     location.hash === "#settings" ? "settings" : "status",
   );
   const [status, setStatus] = useState<Status | null>(null);
+  const [hist, setHist] = useState<{ temp: number[]; batt: number[] }>({ temp: [], batt: [] });
   const [error, setError] = useState<string | null>(null);
   const t = dicts[lang];
+
+  const track = (s: Status) => {
+    setStatus(s);
+    setHist((h) => ({
+      temp: [...h.temp, s.temperature_celsius ?? NaN].slice(-60),
+      batt: [...h.batt, s.battery_percent ?? NaN].slice(-60),
+    }));
+  };
 
   useEffect(() => {
     document.body.classList.toggle("panel", isPanel);
@@ -84,12 +98,12 @@ export default function App() {
     let source: EventSource | null = null;
     fetch("/api/status")
       .then((r) => r.json())
-      .then(setStatus)
+      .then(track)
       .catch(() => setError("unreachable"));
     source = new EventSource("/api/events");
     source.onmessage = (e) => {
       setError(null);
-      setStatus(JSON.parse(e.data));
+      track(JSON.parse(e.data));
     };
     source.onerror = () => setError("unreachable");
     return () => source?.close();
@@ -120,7 +134,7 @@ export default function App() {
       </nav>
       {error && <p className="error">{t.daemonUnreachable}</p>}
       {tab === "status" ? (
-        <StatusView t={t} status={status} refresh={refresh} />
+        <StatusView t={t} status={status} hist={hist} refresh={refresh} />
       ) : (
         <SettingsView t={t} lang={lang} setLang={setLang} />
       )}
@@ -137,14 +151,35 @@ function holdName(s: Session, t: (typeof dicts)["en"]): string {
 function StatusView({
   t,
   status,
+  hist,
   refresh,
 }: {
   t: (typeof dicts)["en"];
   status: Status | null;
+  hist: { temp: number[]; batt: number[] };
   refresh: () => Promise<void>;
 }) {
   const [spawnDir, setSpawnDir] = useState("");
+  const [copiedAttach, setCopiedAttach] = useState<string | null>(null);
+  const [openLog, setOpenLog] = useState<string | null>(null);
+  const [logText, setLogText] = useState("");
   if (!status) return <p className="muted">{t.connecting}</p>;
+
+  const copyAttach = (name: string) => {
+    navigator.clipboard.writeText(`tmux attach -t ${name}`);
+    setCopiedAttach(name);
+    setTimeout(() => setCopiedAttach(null), 1500);
+  };
+
+  const toggleLog = async (name: string) => {
+    if (openLog === name) {
+      setOpenLog(null);
+      return;
+    }
+    const res = await post("/api/tail", { name });
+    setLogText(res.ok ? res.output : (res.error ?? ""));
+    setOpenLog(name);
+  };
 
   const act = async (fn: () => Promise<unknown>) => {
     await fn();
@@ -159,6 +194,8 @@ function StatusView({
         ? t.awakeReasonOne(labels[0])
         : t.awakeReasonMany(status.sessions.length)
       : t.idleDetail;
+  const nextExpiry =
+    status.sessions.length > 0 ? Math.min(...status.sessions.map((s) => s.expires_in_secs)) : null;
 
   return (
     <>
@@ -171,7 +208,13 @@ function StatusView({
               <span className="badge running">{t.lidSafe}</span>
             )}
           </h1>
-          <p className="muted">{heroDetail}</p>
+          <p className="muted small">
+            {heroDetail}
+            {status.awake && status.held_for_secs != null && status.held_for_secs >= 60 && (
+              <> · {t.heldFor(t.dur(status.held_for_secs))}</>
+            )}
+            {nextExpiry !== null && <> · {t.nextRelease(t.dur(nextExpiry))}</>}
+          </p>
         </div>
       </header>
 
@@ -183,41 +226,83 @@ function StatusView({
               ? "—"
               : `${status.battery_percent}%${status.on_ac_power ? " ⚡" : ""}`
           }
+          sub={status.on_ac_power ? t.charging : t.batteryFloor(status.battery_floor_percent)}
+          warn={
+            status.battery_percent !== null &&
+            !status.on_ac_power &&
+            status.battery_percent <= status.battery_floor_percent + 5
+          }
+          spark={hist.batt}
         />
         <Stat
           label={t.temp}
           value={
             status.temperature_celsius === null ? "—" : `${status.temperature_celsius.toFixed(0)}°C`
           }
+          sub={t.thermalCutout(Math.round(status.thermal_threshold_celsius))}
+          warn={
+            status.temperature_celsius !== null &&
+            status.temperature_celsius >= status.thermal_threshold_celsius - 5
+          }
+          spark={hist.temp}
         />
-        <Stat label={t.lid} value={status.lid_closed ? t.lidClosed : t.lidOpen} />
+        <Stat
+          label={t.lid}
+          value={status.lid_closed ? t.lidClosed : t.lidOpen}
+          sub={status.clamshell_active ? t.lidHeld : ""}
+        />
       </section>
 
       <section className="card">
         <h2>{t.holdsTitle}</h2>
-        {status.sessions.length === 0 && <p className="muted">{t.holdsEmpty}</p>}
+        {status.sessions.length === 0 && <p className="muted small">{t.holdsEmpty}</p>}
         <ul>
           {status.sessions.map((s) => (
             <li key={s.id} className="session">
               <div>
-                <strong>{holdName(s, t)}</strong>
-                <span className="badge running">{s.source}</span>
-                <div className="muted small">
-                  {t.activeFor(Math.max(1, Math.round(s.active_secs / 60)))} ·{" "}
-                  {t.ttlLeft(Math.round(s.expires_in_secs / 60))}
+                <div className="row">
+                  <strong>{holdName(s, t)}</strong>
+                  <span className="badge neutral">{s.source}</span>
                 </div>
+                <div className="session-meta">{t.activeFor(t.dur(s.active_secs))}</div>
+              </div>
+              <div className="row">
+                <div className="session-right">{t.ttlLeft(t.dur(s.expires_in_secs))}</div>
+                <button
+                  className="danger small"
+                  onClick={() => act(() => post("/api/release", { id: s.id }))}
+                >
+                  {t.release}
+                </button>
               </div>
             </li>
           ))}
         </ul>
         <div className="row">
-          <button onClick={() => act(() => post("/api/hold", { minutes: 60 }))}>{t.hold1h}</button>
-          <button onClick={() => act(() => post("/api/hold", { minutes: 180 }))}>{t.hold3h}</button>
-          <button className="danger" onClick={() => act(() => post("/api/sleep"))}>
+          {(
+            [
+              [30, t.hold30m],
+              [60, t.hold1h],
+              [180, t.hold3h],
+              [480, t.hold8h],
+            ] as [number, string][]
+          ).map(([minutes, label]) => (
+            <button key={minutes} onClick={() => act(() => post("/api/hold", { minutes }))}>
+              {label}
+            </button>
+          ))}
+          <div className="tabs-spacer" />
+          <button
+            className="danger"
+            disabled={status.sessions.length === 0}
+            onClick={() => act(() => post("/api/sleep"))}
+          >
             {t.letSleep}
           </button>
         </div>
       </section>
+
+      <GuardsCard t={t} status={status} />
 
       <section className="card">
         <h2>{t.sessionsTitle}</h2>
@@ -229,25 +314,40 @@ function StatusView({
         )}
         <ul>
           {status.managed.map((m) => (
-            <li key={m.name} className="session">
+            <li key={m.name} className={openLog === m.name ? "session open" : "session"}>
               <div>
-                <strong>{m.dir.split("/").pop()}</strong>
-                <span className={`badge ${m.status}`}>
-                  {m.status === "running" ? t.running : t.abandoned}
-                </span>
-                {m.respawn_count > 0 && (
-                  <span className="muted small"> {t.revived(m.respawn_count)}</span>
-                )}
-                <div className="muted small">
+                <div className="row">
+                  <strong>{m.dir.split("/").pop()}</strong>
+                  <span className={`badge ${m.status}`}>
+                    {m.status === "running" ? t.running : t.abandoned}
+                  </span>
+                  {m.respawn_count > 0 && (
+                    <span className="muted small">{t.revived(m.respawn_count)}</span>
+                  )}
+                </div>
+                <div className="session-meta">
                   {m.name} · {m.cmd}
                 </div>
               </div>
-              <button
-                className="danger small"
-                onClick={() => act(() => post("/api/kill", { name: m.name }))}
-              >
-                {t.kill}
-              </button>
+              <div className="row">
+                <button className="small" onClick={() => toggleLog(m.name)}>
+                  {openLog === m.name ? t.hideLog : t.viewLog}
+                </button>
+                <button
+                  className="small"
+                  title={`tmux attach -t ${m.name}`}
+                  onClick={() => copyAttach(m.name)}
+                >
+                  {copiedAttach === m.name ? t.copied : "tmux"}
+                </button>
+                <button
+                  className="danger small"
+                  onClick={() => act(() => post("/api/kill", { name: m.name }))}
+                >
+                  {t.kill}
+                </button>
+              </div>
+              {openLog === m.name && <pre className="log">{logText || t.logEmpty}</pre>}
             </li>
           ))}
         </ul>
@@ -274,7 +374,63 @@ function StatusView({
           )}
         </div>
       </section>
+
+      <section className="card">
+        <h2>{t.activityTitle}</h2>
+        {status.activity.length === 0 && <p className="muted small">{t.activityEmpty}</p>}
+        <ul className="activity">
+          {status.activity.slice(0, 8).map((e, i) => (
+            <li key={`${e.t}-${i}`} className="activity-row">
+              <span className="activity-time">{relTime(e.t, t)}</span>
+              <span className="activity-text">{e.text}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
     </>
+  );
+}
+
+function relTime(epochSecs: number, t: (typeof dicts)["en"]): string {
+  const delta = Math.floor(Date.now() / 1000) - epochSecs;
+  if (delta < 60) return t.justNow;
+  return t.ago(t.dur(delta));
+}
+
+function GuardsCard({ t, status }: { t: (typeof dicts)["en"]; status: Status }) {
+  const batteryTripped =
+    status.cutout_latched &&
+    status.battery_percent !== null &&
+    status.battery_percent <= status.battery_floor_percent + 5;
+  const thermalTripped = status.cutout_latched && !batteryTripped;
+  const guards: [string, string, "ok" | "tripped" | "active" | "off"][] = [
+    [t.guardBattery, `${status.battery_floor_percent}%`, batteryTripped ? "tripped" : "ok"],
+    [
+      t.guardThermal,
+      `${Math.round(status.thermal_threshold_celsius)}°C`,
+      thermalTripped ? "tripped" : "ok",
+    ],
+    [t.guardMaxHold, t.maxHoldHours(status.max_hold_hours), "ok"],
+    [t.guardClamshell, "", status.clamshell_active ? "active" : "off"],
+  ];
+  const badge = { ok: t.guardOk, tripped: t.guardTripped, active: t.guardActive, off: t.guardOff };
+  return (
+    <section className="card">
+      <h2>{t.guardsTitle}</h2>
+      <ul>
+        {guards.map(([name, value, state]) => (
+          <li key={name} className="session">
+            <span>{name}</span>
+            <span className="row">
+              {value && <span className="session-right">{value}</span>}
+              <span className={`badge ${state === "tripped" ? "abandoned" : state === "off" ? "neutral" : "running"}`}>
+                {badge[state]}
+              </span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -302,6 +458,13 @@ function SettingsView({
   const [setup, setSetup] = useState<Setup | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [testSent, setTestSent] = useState(false);
+
+  const sendTest = async () => {
+    await post("/api/notify-test");
+    setTestSent(true);
+    setTimeout(() => setTestSent(false), 2000);
+  };
 
   const load = () =>
     fetch("/api/setup")
@@ -352,8 +515,10 @@ function SettingsView({
           return (
             <div key={p.id} className="provider">
               <div>
-                <strong>{p.label}</strong>
-                {p.recommended && <span className="badge running">{t.recommended}</span>}
+                <div className="row">
+                  <strong>{p.label}</strong>
+                  {p.recommended && <span className="badge running">{t.recommended}</span>}
+                </div>
                 <div className="muted small">{p.description}</div>
                 <div className={connected ? "small ok" : "small muted"}>
                   {providerStateLabel(p.state, t)}
@@ -388,6 +553,9 @@ function SettingsView({
             <>
               <span className="badge running">{t.notifyOn}</span>
               <span className="mono small">{setup.ntfy_topic}</span>
+              <button className="small" onClick={sendTest}>
+                {testSent ? t.notifySent : t.notifyTest}
+              </button>
               <button className="danger small" onClick={() => toggleNtfy(false)}>
                 {t.notifyDisable}
               </button>
@@ -435,11 +603,42 @@ function SettingsView({
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({
+  label,
+  value,
+  sub,
+  warn,
+  spark,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  warn?: boolean;
+  spark?: number[];
+}) {
   return (
-    <div className="stat">
+    <div className={warn ? "stat warn" : "stat"}>
       <div className="stat-value">{value}</div>
-      <div className="muted small">{label}</div>
+      <div className="stat-label">{label}</div>
+      {sub ? <div className="stat-sub">{sub}</div> : null}
+      {spark ? <Spark data={spark} /> : null}
     </div>
+  );
+}
+
+function Spark({ data }: { data: number[] }) {
+  const pts = data.filter((v) => Number.isFinite(v));
+  if (pts.length < 2) return null;
+  const min = Math.min(...pts);
+  const range = Math.max(...pts) - min || 1;
+  const w = 60;
+  const h = 14;
+  const path = pts
+    .map((v, i) => `${((i / (pts.length - 1)) * w).toFixed(1)},${(h - 1 - ((v - min) / range) * (h - 2)).toFixed(1)}`)
+    .join(" ");
+  return (
+    <svg className="spark" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden>
+      <polyline points={path} fill="none" stroke="currentColor" strokeWidth="1" />
+    </svg>
   );
 }

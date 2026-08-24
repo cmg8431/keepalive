@@ -1,6 +1,23 @@
 export type Lang = "ko" | "en";
 
+function durKo(secs: number): string {
+  const m = Math.max(1, Math.round(secs / 60));
+  if (m < 60) return `${m}분`;
+  const h = Math.floor(m / 60);
+  const rest = m % 60;
+  return rest === 0 ? `${h}시간` : `${h}시간 ${rest}분`;
+}
+
+function durEn(secs: number): string {
+  const m = Math.max(1, Math.round(secs / 60));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rest = m % 60;
+  return rest === 0 ? `${h}h` : `${h}h ${rest}m`;
+}
+
 const ko = {
+  dur: durKo,
   tabStatus: "상태",
   tabSettings: "설정",
   connecting: "연결 중…",
@@ -18,13 +35,39 @@ const ko = {
   lid: "뚜껑",
   lidOpen: "열림",
   lidClosed: "닫힘",
+  nextRelease: (d: string) => `가장 이른 자동 해제 ${d} 후`,
+  batteryFloor: (n: number) => `바닥 ${n}%`,
+  charging: "충전 중",
+  thermalCutout: (n: number) => `차단 ${n}°C`,
+  lidHeld: "닫아도 유지",
   holdsTitle: "깨움 유지 중인 작업",
   holdsEmpty: "없음 — 맥이 자유롭게 잘 수 있어요",
-  activeFor: (m: number) => `${m}분째 진행`,
-  ttlLeft: (m: number) => `${m}분 후 자동 해제`,
-  hold1h: "1시간 깨워두기",
-  hold3h: "3시간 깨워두기",
+  activeFor: (d: string) => `${d}째 진행`,
+  ttlLeft: (d: string) => `${d} 후 해제`,
+  heldFor: (d: string) => `${d}째 깨어있음`,
+  release: "해제",
+  hold30m: "+30분",
+  hold1h: "+1시간",
+  hold3h: "+3시간",
+  hold8h: "+8시간",
   letSleep: "이제 재우기",
+  guardsTitle: "안전 가드",
+  guardBattery: "배터리 바닥",
+  guardThermal: "온도 차단 (뚜껑 닫힘)",
+  guardMaxHold: "최대 유지 시간",
+  guardClamshell: "뚜껑 닫힘 보호",
+  guardOk: "정상",
+  guardTripped: "발동됨",
+  guardActive: "작동 중",
+  guardOff: "대기",
+  maxHoldHours: (h: number) => `${h}시간`,
+  activityTitle: "최근 활동",
+  activityEmpty: "아직 기록 없음",
+  ago: (d: string) => `${d} 전`,
+  justNow: "방금",
+  viewLog: "로그",
+  hideLog: "닫기",
+  logEmpty: "출력 없음",
   sessionsTitle: "에이전트 세션",
   sessionsEmpty: "관리 중인 세션 없음",
   sessionsHint: "여기서 시작한 세션은 연결이 끊겨도 살아있고, 죽으면 대화를 이어서 자동 부활합니다",
@@ -53,6 +96,8 @@ const ko = {
   notifyEnable: "켜기",
   notifyDisable: "끄기",
   notifyOn: "켜짐",
+  notifyTest: "테스트 알림",
+  notifySent: "보냄",
   scanNtfy: "ntfy 앱을 설치하고 이 QR로 토픽을 구독하세요",
   wakeHint: '잠든 맥 깨우기: 이 토픽으로 "wake" 메시지를 보내면 됩니다',
   settingsClamshell: "뚜껑 닫고 쓰기",
@@ -63,6 +108,7 @@ const ko = {
 };
 
 const en: typeof ko = {
+  dur: durEn,
   tabStatus: "Status",
   tabSettings: "Settings",
   connecting: "connecting…",
@@ -80,13 +126,39 @@ const en: typeof ko = {
   lid: "lid",
   lidOpen: "open",
   lidClosed: "closed",
+  nextRelease: (d: string) => `earliest auto-release in ${d}`,
+  batteryFloor: (n: number) => `floor ${n}%`,
+  charging: "charging",
+  thermalCutout: (n: number) => `cutout ${n}°C`,
+  lidHeld: "held while closed",
   holdsTitle: "Active wake holds",
   holdsEmpty: "None — the Mac is free to sleep",
-  activeFor: (m: number) => `active ${m}m`,
-  ttlLeft: (m: number) => `auto-release in ${m}m`,
-  hold1h: "Hold 1 hour",
-  hold3h: "Hold 3 hours",
+  activeFor: (d: string) => `active ${d}`,
+  ttlLeft: (d: string) => `releases in ${d}`,
+  heldFor: (d: string) => `awake for ${d}`,
+  release: "release",
+  hold30m: "+30m",
+  hold1h: "+1h",
+  hold3h: "+3h",
+  hold8h: "+8h",
   letSleep: "Let it sleep",
+  guardsTitle: "Safety guards",
+  guardBattery: "Battery floor",
+  guardThermal: "Thermal cutout (lid closed)",
+  guardMaxHold: "Max hold",
+  guardClamshell: "Lid-closed guard",
+  guardOk: "ok",
+  guardTripped: "tripped",
+  guardActive: "active",
+  guardOff: "standby",
+  maxHoldHours: (h: number) => `${h}h`,
+  activityTitle: "Recent activity",
+  activityEmpty: "nothing yet",
+  ago: (d: string) => `${d} ago`,
+  justNow: "just now",
+  viewLog: "log",
+  hideLog: "hide",
+  logEmpty: "no output",
   sessionsTitle: "Agent sessions",
   sessionsEmpty: "No managed sessions",
   sessionsHint: "Sessions started here survive disconnects and auto-revive with their conversation intact",
@@ -115,6 +187,8 @@ const en: typeof ko = {
   notifyEnable: "Enable",
   notifyDisable: "Disable",
   notifyOn: "on",
+  notifyTest: "Test notification",
+  notifySent: "sent",
   scanNtfy: "Install the ntfy app and subscribe via this QR",
   wakeHint: 'To wake a sleeping Mac: publish "wake" to this topic',
   settingsClamshell: "Lid-closed operation",

@@ -46,6 +46,9 @@ pub(crate) enum Request {
     Kill {
         name: String,
     },
+    Tail {
+        name: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -68,7 +71,9 @@ struct StatusResponse {
     lid_closed: bool,
     cutout_latched: bool,
     clamshell_active: bool,
+    held_for_secs: Option<u64>,
     managed: Vec<ManagedSessionInfo>,
+    activity: Vec<serde_json::Value>,
 }
 
 pub(crate) struct Daemon {
@@ -364,6 +369,12 @@ impl Daemon {
             Request::Sessions => {
                 return serde_json::json!({ "ok": true, "managed": self.managed.list() });
             }
+            Request::Tail { name } => {
+                return match self.managed.tail(&name) {
+                    Ok(output) => serde_json::json!({ "ok": true, "output": output }),
+                    Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+                };
+            }
             Request::Kill { name } => match self.managed.kill(&name) {
                 Ok(found) => {
                     self.table.release(&format!("managed:{name}"));
@@ -394,7 +405,11 @@ impl Daemon {
                     lid_closed: power::lid_closed(),
                     cutout_latched: self.latch.is_latched(),
                     clamshell_active: self.clamshell_active,
+                    held_for_secs: self
+                        .held_since
+                        .map(|t| now.saturating_duration_since(t).as_secs()),
                     managed: self.managed.list(),
+                    activity: recent_activity(20),
                 })
                 .unwrap_or_else(|_| serde_json::json!({ "ok": false }));
             }
@@ -404,8 +419,32 @@ impl Daemon {
     }
 }
 
+/// Everything worth logging is also worth showing in the dashboard's
+/// activity feed, so log() doubles as the event recorder.
+static ACTIVITY: std::sync::Mutex<std::collections::VecDeque<(u64, String)>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
 fn log(msg: &str) {
     println!("[keepalived] {msg}");
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut buf = ACTIVITY.lock().unwrap();
+    buf.push_back((epoch, msg.to_string()));
+    while buf.len() > 50 {
+        buf.pop_front();
+    }
+}
+
+fn recent_activity(limit: usize) -> Vec<serde_json::Value> {
+    ACTIVITY
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .take(limit)
+        .map(|(t, m)| serde_json::json!({ "t": t, "text": m }))
+        .collect()
 }
 
 pub async fn serve() -> Result<()> {

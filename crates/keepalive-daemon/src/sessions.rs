@@ -44,8 +44,17 @@ pub struct SessionManager {
     counter: u32,
 }
 
+/// launchd starts the daemon with a minimal PATH, so Homebrew's tmux has to
+/// be found by absolute path rather than lookup.
+fn tmux_bin() -> &'static str {
+    ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap_or("tmux")
+}
+
 fn tmux(args: &[&str]) -> Result<std::process::Output> {
-    Command::new("tmux")
+    Command::new(tmux_bin())
         .args(args)
         .output()
         .context("running tmux — is it installed?")
@@ -113,6 +122,32 @@ impl SessionManager {
             },
         );
         Ok(name)
+    }
+
+    /// Last visible lines of a managed session's pane, for a remote glance at
+    /// what the agent is doing. Only sessions this manager spawned are
+    /// readable — arbitrary tmux targets stay out of reach of the dashboard.
+    pub fn tail(&self, name: &str) -> Result<String> {
+        if !self.sessions.contains_key(name) {
+            bail!("unknown session: {name}");
+        }
+        // capture-pane takes a pane target: "=name:" is the exact-matched
+        // session's active window/pane (bare "=name" is not a valid pane ref).
+        let target = format!("={name}:");
+        let out = tmux(&["capture-pane", "-p", "-t", &target])?;
+        if !out.status.success() {
+            bail!(
+                "tmux capture-pane failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut lines: Vec<&str> = text.lines().collect();
+        while lines.last().is_some_and(|l| l.trim().is_empty()) {
+            lines.pop();
+        }
+        let start = lines.len().saturating_sub(25);
+        Ok(lines[start..].join("\n"))
     }
 
     pub fn kill(&mut self, name: &str) -> Result<bool> {

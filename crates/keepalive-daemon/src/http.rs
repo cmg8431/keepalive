@@ -32,9 +32,12 @@ pub async fn serve_http(daemon: Arc<Mutex<Daemon>>, config: Config) {
         .route("/api/status", get(api_status))
         .route("/api/events", get(api_events))
         .route("/api/hold", post(api_hold))
+        .route("/api/release", post(api_release))
         .route("/api/sleep", post(api_sleep))
         .route("/api/spawn", post(api_spawn))
         .route("/api/kill", post(api_kill))
+        .route("/api/tail", post(api_tail))
+        .route("/api/notify-test", post(api_notify_test))
         .route("/api/setup", get(api_setup))
         .route("/api/setup/provider", post(api_setup_provider))
         .route("/api/setup/ntfy", post(api_setup_ntfy))
@@ -161,7 +164,13 @@ fn ask(state: &AppState, req: Request) -> serde_json::Value {
 fn status_with_projects(state: &AppState) -> serde_json::Value {
     let mut daemon = state.daemon.lock().unwrap();
     let mut status = daemon.handle(Request::Status);
-    status["projects"] = serde_json::json!(daemon.config().projects);
+    let config = daemon.config();
+    status["projects"] = serde_json::json!(config.projects);
+    // Guard thresholds so the dashboard can show live margins, not just raw
+    // readings — "82% (floor 30%)" answers "when would it sleep?" at a glance.
+    status["battery_floor_percent"] = serde_json::json!(config.battery_floor_percent);
+    status["thermal_threshold_celsius"] = serde_json::json!(config.thermal_threshold_celsius);
+    status["max_hold_hours"] = serde_json::json!(config.max_hold_hours);
     status
 }
 
@@ -197,6 +206,18 @@ async fn api_hold(
             minutes: body.minutes,
         },
     ))
+}
+
+#[derive(Deserialize)]
+struct ReleaseBody {
+    id: String,
+}
+
+async fn api_release(
+    State(state): State<AppState>,
+    Json(body): Json<ReleaseBody>,
+) -> Json<serde_json::Value> {
+    Json(ask(&state, Request::Release { id: body.id }))
 }
 
 async fn api_sleep(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -266,6 +287,22 @@ async fn api_kill(
     Json(body): Json<KillBody>,
 ) -> Json<serde_json::Value> {
     Json(ask(&state, Request::Kill { name: body.name }))
+}
+
+async fn api_tail(
+    State(state): State<AppState>,
+    Json(body): Json<KillBody>,
+) -> Json<serde_json::Value> {
+    Json(ask(&state, Request::Tail { name: body.name }))
+}
+
+async fn api_notify_test(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let topic = state.daemon.lock().unwrap().config().ntfy_topic.clone();
+    if topic.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "notifications are not enabled" }));
+    }
+    crate::notify::push(&topic, "keepalive", "Test notification — the pipe works");
+    Json(serde_json::json!({ "ok": true }))
 }
 
 async fn static_assets(uri: Uri) -> impl IntoResponse {
