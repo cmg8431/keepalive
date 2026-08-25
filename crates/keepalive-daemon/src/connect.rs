@@ -71,6 +71,33 @@ pub fn tailscale_ip() -> Option<IpAddr> {
     None
 }
 
+/// The Mac's address on the local network (192.168/10.x/172.16-31), for
+/// same-Wi-Fi access without any VPN. Real network interfaces (en0/en1) are
+/// asked first so a VM bridge or container network can't shadow the Wi-Fi
+/// address; CGNAT is excluded — that's the tailnet, handled separately.
+pub fn lan_ip() -> Option<IpAddr> {
+    for iface in ["en0", "en1"] {
+        if let Ok(out) = Command::new("ipconfig").args(["getifaddr", iface]).output()
+            && out.status.success()
+            && let Ok(IpAddr::V4(v4)) = String::from_utf8_lossy(&out.stdout).trim().parse()
+            && v4.is_private()
+        {
+            return Some(IpAddr::V4(v4));
+        }
+    }
+    let out = Command::new("ifconfig").output().ok()?;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(rest) = line.trim().strip_prefix("inet ")
+            && let Some(addr) = rest.split_whitespace().next()
+            && let Ok(IpAddr::V4(v4)) = addr.parse::<IpAddr>()
+            && v4.is_private()
+        {
+            return Some(IpAddr::V4(v4));
+        }
+    }
+    None
+}
+
 /// The machine's MagicDNS name (`macbookpro.tailXXXX.ts.net`), which is both
 /// nicer to type than an IP and the only name a TLS certificate can be issued
 /// for.

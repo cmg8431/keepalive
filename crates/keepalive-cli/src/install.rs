@@ -11,14 +11,18 @@ const HOOK_EVENTS: [(&str, &str); 4] = [
     ("SessionEnd", "release"),
 ];
 
-pub fn install() -> Result<()> {
+pub fn install(hooks_only: bool) -> Result<()> {
     let bin = std::env::current_exe()?
         .canonicalize()
         .context("resolving binary path")?;
-    install_launch_agent(&bin)?;
+    if !hooks_only {
+        install_launch_agent(&bin)?;
+    }
     install_claude_hooks(&bin)?;
     println!("keepalive installed:");
-    println!("  daemon: LaunchAgent {LAUNCHD_LABEL} (starts at login, restarts on crash)");
+    if !hooks_only {
+        println!("  daemon: LaunchAgent {LAUNCHD_LABEL} (starts at login, restarts on crash)");
+    }
     println!("  claude-code: hooks in {}", settings_path().display());
     for report in crate::agents::install_all(&bin) {
         println!("  {}: {}", report.name, report.detail);

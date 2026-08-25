@@ -51,20 +51,35 @@ pub async fn serve_http(daemon: Arc<Mutex<Daemon>>, config: Config) {
         .route("/api/setup/provider", post(api_setup_provider))
         .route("/api/setup/ntfy", post(api_setup_ntfy))
         .route("/api/setup/https", post(api_setup_https))
+        .route("/api/setup/lan", post(api_setup_lan))
+        .route("/api/setup/hooks", post(api_setup_hooks))
         .fallback(static_assets)
-        .with_state(state);
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            lan_guard,
+        ))
+        .with_state(state.clone());
 
     bind(app.clone(), SocketAddr::from(([127, 0, 0, 1], port)));
-    // The Tailscale interface can appear at any time (setup wizard installs
-    // it live), so keep watching and bind as soon as it exists.
+    // Interfaces come and go while the daemon runs (Tailscale login, Wi-Fi
+    // hops, LAN access toggled on): keep watching and bind whatever exists.
     tokio::spawn(async move {
-        let mut bound: Option<IpAddr> = None;
+        let mut bound_ts: Option<IpAddr> = None;
+        let mut bound_lan: Option<IpAddr> = None;
         loop {
             if let Some(ip) = crate::connect::tailscale_ip()
-                && bound != Some(ip)
+                && bound_ts != Some(ip)
             {
                 bind(app.clone(), SocketAddr::new(ip, port));
-                bound = Some(ip);
+                bound_ts = Some(ip);
+            }
+            let lan_on = !state.daemon.lock().unwrap().config().lan_key.is_empty();
+            if lan_on
+                && let Some(ip) = crate::connect::lan_ip()
+                && bound_lan != Some(ip)
+            {
+                bind(app.clone(), SocketAddr::new(ip, port));
+                bound_lan = Some(ip);
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
@@ -76,13 +91,69 @@ fn bind(app: Router, addr: SocketAddr) {
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
                 println!("[keepalived] dashboard on http://{addr}");
-                if let Err(e) = axum::serve(listener, app).await {
+                if let Err(e) = axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                {
                     eprintln!("[keepalived] dashboard server on {addr} failed: {e}");
                 }
             }
             Err(e) => eprintln!("[keepalived] dashboard bind {addr} failed: {e}"),
         }
     });
+}
+
+/// Reachability is the auth boundary for localhost and the tailnet, but the
+/// LAN is shared territory (cafe Wi-Fi, office networks), so LAN peers must
+/// present the pairing key once — from the QR deep link — and get a cookie.
+/// The key never grants more than the tailnet already has.
+async fn lan_guard(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let trusted = match peer.ip() {
+        IpAddr::V4(v4) => {
+            v4.is_loopback() || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]))
+        }
+        IpAddr::V6(v6) => v6.is_loopback(),
+    };
+    if trusted {
+        return next.run(req).await;
+    }
+    let key = state.daemon.lock().unwrap().config().lan_key.clone();
+    if key.is_empty() {
+        return (StatusCode::FORBIDDEN, "LAN access is not enabled").into_response();
+    }
+    let from_cookie = req
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|c| {
+            c.split(';')
+                .any(|pair| pair.trim().strip_prefix("ka=") == Some(key.as_str()))
+        });
+    let from_query = req
+        .uri()
+        .query()
+        .is_some_and(|q| q.split('&').any(|pair| pair.strip_prefix("k=") == Some(&key)));
+    if !from_cookie && !from_query {
+        return (StatusCode::FORBIDDEN, "pairing required — scan the QR from the Mac")
+            .into_response();
+    }
+    let mut response = next.run(req).await;
+    if from_query && !from_cookie {
+        // First visit through the QR link: persist the pairing in a cookie so
+        // every later request (and the home-screen PWA) just works.
+        let cookie = format!("ka={key}; Path=/; Max-Age=31536000; SameSite=Lax");
+        if let Ok(value) = header::HeaderValue::from_str(&cookie) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+    response
 }
 
 fn qr_svg(data: &str) -> Option<String> {
@@ -96,13 +167,20 @@ fn qr_svg(data: &str) -> Option<String> {
 }
 
 fn random_topic() -> String {
+    format!("keepalive-{}", random_hex(6))
+}
+
+fn random_key() -> String {
+    random_hex(16)
+}
+
+fn random_hex(bytes: usize) -> String {
     use std::io::Read;
-    let mut buf = [0u8; 6];
+    let mut buf = vec![0u8; bytes];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         let _ = f.read_exact(&mut buf);
     }
-    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
-    format!("keepalive-{hex}")
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The menu bar panel has no address bar, so it asks the daemon to hand the
@@ -131,6 +209,11 @@ async fn api_setup(State(state): State<AppState>) -> Json<serde_json::Value> {
     };
     let ntfy_url =
         (!config.ntfy_topic.is_empty()).then(|| format!("https://ntfy.sh/{}", config.ntfy_topic));
+    // The LAN QR carries the pairing key: scanning it is the whole handshake.
+    let lan_url = (!config.lan_key.is_empty())
+        .then(crate::connect::lan_ip)
+        .flatten()
+        .map(|ip| format!("http://{ip}:{}/?k={}", config.web_port, config.lan_key));
     Json(serde_json::json!({
         "ok": true,
         "providers": crate::connect::providers(),
@@ -143,6 +226,9 @@ async fn api_setup(State(state): State<AppState>) -> Json<serde_json::Value> {
         "dashboard_qr": dashboard_url.as_deref().and_then(qr_svg),
         "magic_dns": magic_dns,
         "https_enabled": https_on,
+        "lan_enabled": !config.lan_key.is_empty(),
+        "lan_url": lan_url,
+        "lan_qr": lan_url.as_deref().and_then(qr_svg),
         "ntfy_url": ntfy_url,
         "ntfy_qr": ntfy_url.as_deref().and_then(qr_svg),
     }))
@@ -167,6 +253,51 @@ async fn api_setup_https(
     match crate::connect::enable_https(port) {
         Ok(url) => Json(serde_json::json!({ "ok": true, "url": url })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct LanBody {
+    enable: bool,
+}
+
+/// Same-Wi-Fi access: mint (or drop) the pairing key. The bind watcher picks
+/// up the LAN interface within seconds of the key existing.
+async fn api_setup_lan(
+    State(state): State<AppState>,
+    Json(body): Json<LanBody>,
+) -> Json<serde_json::Value> {
+    let mut config = state.daemon.lock().unwrap().config().clone();
+    if body.enable {
+        if config.lan_key.is_empty() {
+            config.lan_key = random_key();
+        }
+    } else {
+        config.lan_key.clear();
+    }
+    if let Err(e) = config.save() {
+        return Json(serde_json::json!({ "ok": false, "error": format!("saving config: {e}") }));
+    }
+    state.daemon.lock().unwrap().reload_config(config.clone());
+    Json(serde_json::json!({ "ok": true, "enabled": !config.lan_key.is_empty() }))
+}
+
+/// One tap instead of "open a terminal and run keepalive install": the daemon
+/// is the CLI binary, so it can re-run its own installer for agent hooks.
+async fn api_setup_hooks(State(_state): State<AppState>) -> Json<serde_json::Value> {
+    let Ok(bin) = std::env::current_exe() else {
+        return Json(serde_json::json!({ "ok": false, "error": "cannot locate the keepalive binary" }));
+    };
+    match std::process::Command::new(bin)
+        .args(["install", "--hooks-only"])
+        .output()
+    {
+        Ok(out) if out.status.success() => Json(serde_json::json!({ "ok": true })),
+        Ok(out) => Json(serde_json::json!({
+            "ok": false,
+            "error": String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("running installer: {e}") })),
     }
 }
 

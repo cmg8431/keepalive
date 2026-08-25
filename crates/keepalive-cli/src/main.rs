@@ -60,7 +60,11 @@ enum Commands {
     /// Print the Claude Code hooks snippet for manual installation
     Hooks,
     /// Install the LaunchAgent (login autostart) and Claude Code hooks
-    Install,
+    Install {
+        /// Only (re)wire agent hooks; leave the LaunchAgent alone
+        #[arg(long)]
+        hooks_only: bool,
+    },
     /// Remove the LaunchAgent and clean up hooks
     Uninstall,
     /// Install the passwordless pmset rule for lid-closed wake (run with sudo)
@@ -163,7 +167,7 @@ fn run(cli: Cli) -> Result<()> {
             print_hooks_snippet();
             Ok(())
         }
-        Commands::Install => install::install(),
+        Commands::Install { hooks_only } => install::install(hooks_only),
         Commands::Uninstall => install::uninstall(),
         Commands::Mcp => mcp::serve(),
         Commands::Setup => setup::run(),

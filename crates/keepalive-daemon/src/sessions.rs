@@ -27,6 +27,35 @@ pub struct ManagedSession {
     pub status: SessionStatus,
     pub respawn_count: u32,
     pub spawned_at: Instant,
+    attention: AttentionState,
+}
+
+impl ManagedSession {
+    fn new(dir: PathBuf, cmd: String) -> Self {
+        Self {
+            dir,
+            cmd,
+            status: SessionStatus::Running,
+            respawn_count: 0,
+            spawned_at: Instant::now(),
+            attention: AttentionState::default(),
+        }
+    }
+}
+
+/// Tracks whether the agent inside a session looks parked on a question.
+/// The screen not changing across ticks while the agent's "working" marker is
+/// absent is the signal; one notification per pause, reset when work resumes.
+#[derive(Debug, Default)]
+struct AttentionState {
+    pane_hash: u64,
+    stable_ticks: u32,
+    waiting: bool,
+    notified: bool,
+    /// The agent has visibly worked at least once. A session idling at its
+    /// welcome prompt is "waiting" on the dashboard but not push-worthy —
+    /// the person who just spawned it knows it's there.
+    was_busy: bool,
 }
 
 #[derive(Serialize)]
@@ -36,6 +65,7 @@ pub struct ManagedSessionInfo {
     pub cmd: String,
     pub status: SessionStatus,
     pub respawn_count: u32,
+    pub waiting: bool,
 }
 
 #[derive(Default)]
@@ -88,6 +118,49 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Raw pane text for the attention heuristic; None if tmux can't answer.
+fn pane_text(name: &str) -> Option<String> {
+    let target = format!("={name}:");
+    let out = tmux(&["capture-pane", "-p", "-t", &target]).ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn tmux_attached(name: &str) -> bool {
+    let target = format!("={name}:");
+    tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        &target,
+        "#{session_attached}",
+    ])
+    .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() != "0")
+}
+
+/// Waiting detection only makes sense for interactive agents that pause on
+/// questions; a build script sitting quiet is just a quiet build script.
+fn is_interactive_agent(cmd: &str) -> bool {
+    let base = cmd.split_whitespace().next().unwrap_or("");
+    let base = base.rsplit('/').next().unwrap_or(base);
+    matches!(base, "claude" | "codex" | "gemini" | "aider" | "amp" | "opencode")
+}
+
+/// Claude Code (and codex) print this while a turn is running; its absence
+/// plus a frozen screen is the strongest "parked on a question" signal
+/// available from outside the process.
+fn looks_busy(pane: &str) -> bool {
+    pane.contains("esc to interrupt") || pane.contains("Esc to interrupt")
+}
+
+fn hash_pane(pane: &str) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    pane.hash(&mut h);
+    h.finish()
+}
+
 /// The revival command restores conversation context for claude-family
 /// commands; anything else is restarted as-is.
 fn revival_cmd(cmd: &str) -> String {
@@ -131,15 +204,12 @@ impl SessionManager {
             }
             self.sessions.insert(
                 name.to_string(),
-                ManagedSession {
-                    dir: PathBuf::from(if dir.is_empty() { "/" } else { dir }),
-                    // The original command is gone with the old daemon; revival
-                    // uses the same default the spawn path does.
-                    cmd: "claude".to_string(),
-                    status: SessionStatus::Running,
-                    respawn_count: 0,
-                    spawned_at: Instant::now(),
-                },
+                // The original command is gone with the old daemon; revival
+                // uses the same default the spawn path does.
+                ManagedSession::new(
+                    PathBuf::from(if dir.is_empty() { "/" } else { dir }),
+                    "claude".to_string(),
+                ),
             );
             adopted += 1;
         }
@@ -161,16 +231,8 @@ impl SessionManager {
             bail!("session {name} already exists");
         }
         tmux_spawn(&name, &dir, &cmd)?;
-        self.sessions.insert(
-            name.clone(),
-            ManagedSession {
-                dir,
-                cmd,
-                status: SessionStatus::Running,
-                respawn_count: 0,
-                spawned_at: Instant::now(),
-            },
-        );
+        self.sessions
+            .insert(name.clone(), ManagedSession::new(dir, cmd));
         Ok(name)
     }
 
@@ -330,15 +392,7 @@ impl SessionManager {
 
     /// Whether a real tmux client is looking at this session right now.
     fn attached(&self, name: &str) -> bool {
-        let target = format!("={name}:");
-        tmux(&[
-            "display-message",
-            "-p",
-            "-t",
-            &target,
-            "#{session_attached}",
-        ])
-        .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() != "0")
+        tmux_attached(name)
     }
 
     pub fn send_raw(&self, name: &str, bytes: &[u8]) -> Result<()> {
@@ -384,6 +438,9 @@ impl SessionManager {
             if tmux_alive(name) {
                 if session.respawn_count > 0 && now - session.spawned_at >= RESPAWN_RESET {
                     session.respawn_count = 0;
+                }
+                if let Some(event) = watch_attention(name, session) {
+                    events.push(event);
                 }
                 continue;
             }
@@ -440,9 +497,45 @@ impl SessionManager {
                 cmd: s.cmd.clone(),
                 status: s.status,
                 respawn_count: s.respawn_count,
+                waiting: s.attention.waiting,
             })
             .collect()
     }
+}
+
+/// One attention check for one live session. Returns a notification-worthy
+/// event exactly once per pause: two consecutive frozen ticks (~30s) with no
+/// busy marker. Someone attached in a local terminal is already looking, so
+/// no push for them.
+fn watch_attention(name: &str, session: &mut ManagedSession) -> Option<(String, String)> {
+    if !is_interactive_agent(&session.cmd) {
+        return None;
+    }
+    let att = &mut session.attention;
+    let pane = pane_text(name)?;
+    let hash = hash_pane(&pane);
+    let changed = hash != att.pane_hash;
+    att.pane_hash = hash;
+    if changed || looks_busy(&pane) {
+        att.was_busy = att.was_busy || looks_busy(&pane);
+        att.stable_ticks = 0;
+        att.waiting = false;
+        att.notified = false;
+        return None;
+    }
+    att.stable_ticks += 1;
+    if att.stable_ticks < 2 || att.notified {
+        return None;
+    }
+    att.waiting = true;
+    att.notified = true;
+    if !att.was_busy || tmux_attached(name) {
+        return None;
+    }
+    Some((
+        name.to_string(),
+        format!("session {name} is waiting for your input"),
+    ))
 }
 
 #[derive(Serialize, PartialEq, Eq, Clone)]
@@ -472,5 +565,20 @@ mod tests {
     #[test]
     fn shell_quote_escapes_single_quotes() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn attention_only_watches_interactive_agents() {
+        assert!(is_interactive_agent("claude"));
+        assert!(is_interactive_agent("/usr/local/bin/claude --model opus"));
+        assert!(is_interactive_agent("codex"));
+        assert!(!is_interactive_agent("npm run build"));
+        assert!(!is_interactive_agent("sleep 999"));
+    }
+
+    #[test]
+    fn busy_marker_detected() {
+        assert!(looks_busy("Cogitating… (esc to interrupt)"));
+        assert!(!looks_busy("❯ waiting at the prompt"));
     }
 }

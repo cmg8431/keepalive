@@ -684,6 +684,23 @@ select {
   background: var(--danger);
 }
 
+/* An agent parked on a question: amber, gently pulsing — the one badge that
+   asks to be acted on rather than just read. */
+.badge.waiting {
+  color: var(--warn);
+  margin-left: 7px;
+}
+
+.badge.waiting::before {
+  background: var(--warn);
+  box-shadow: 0 0 6px rgba(255, 202, 22, 0.55);
+  animation: waiting-blink 1.6s ease-in-out infinite;
+}
+
+@keyframes waiting-blink {
+  50% { opacity: 0.35; }
+}
+
 /* ---- log & activity ---- */
 
 .log {

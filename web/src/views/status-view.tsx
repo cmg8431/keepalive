@@ -112,9 +112,13 @@ export function StatusView({
       return {
         key: m.name,
         kind: "session" as const,
-        tone: (m.status === "running" ? "green" : "orange") as "green" | "orange",
+        tone: (m.waiting ? "orange" : m.status === "running" ? "green" : "orange") as
+          | "green"
+          | "orange",
         title: m.dir.split("/").pop() ?? m.name,
-        detail: `${m.status === "running" ? t.running : t.abandoned} · ${countdown}`,
+        detail: m.waiting
+          ? t.waitingHint
+          : `${m.status === "running" ? t.running : t.abandoned} · ${countdown}`,
         session: m.name,
         holdId: hold?.id,
       };

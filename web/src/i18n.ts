@@ -210,6 +210,14 @@ const ko = {
   httpsEnable: "켜기",
   httpsDisable: "끄기",
   httpsOn: "켜짐",
+  settingsLan: "같은 와이파이로 바로 연결",
+  settingsLanDesc: "Tailscale 없이도 같은 네트워크의 폰에서 QR 한 번이면 붙어요",
+  settingsLanNoNetwork: "네트워크 주소를 찾는 중이에요",
+  lanEnable: "켜기",
+  lanDisable: "끄기",
+  scanLan: "같은 와이파이의 폰으로 찍으면 페어링까지 한 번에 끝나요. 밖에서는 Tailscale로 접속하세요",
+  waitingBadge: "답 기다리는 중",
+  waitingHint: "에이전트가 물어보고 멈춰 있어요. 열어서 답해주세요",
 };
 
 const en: typeof ko = {
@@ -406,6 +414,15 @@ const en: typeof ko = {
   httpsEnable: "Enable",
   httpsDisable: "Disable",
   httpsOn: "on",
+  settingsLan: "Same Wi-Fi instant access",
+  settingsLanDesc: "No VPN needed — a phone on this network pairs with a single QR scan",
+  settingsLanNoNetwork: "looking for a network address",
+  lanEnable: "Enable",
+  lanDisable: "Disable",
+  scanLan:
+    "Scan from a phone on this Wi-Fi — the link carries the pairing key. Away from home, use Tailscale",
+  waitingBadge: "waiting for you",
+  waitingHint: "The agent asked something and is parked. Open it and answer",
 };
 
 export const dicts = { ko, en };

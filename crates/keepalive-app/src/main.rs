@@ -33,6 +33,15 @@ fn request(req: &serde_json::Value) -> Result<serde_json::Value> {
 fn tray_title() -> &'static str {
     match request(&serde_json::json!({ "cmd": "status" })) {
         Ok(s) if s["cutout_latched"].as_bool().unwrap_or(false) => "☂",
+        // An agent parked on a question outranks plain "awake" — that's the
+        // moment the menu bar should pull the eye.
+        Ok(s)
+            if s["managed"]
+                .as_array()
+                .is_some_and(|m| m.iter().any(|x| x["waiting"].as_bool().unwrap_or(false))) =>
+        {
+            "✳"
+        }
         Ok(s) if s["awake"].as_bool().unwrap_or(false) => "☀",
         _ => "☾",
     }

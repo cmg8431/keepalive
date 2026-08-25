@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bell, Check, FolderGit2, Laptop, Plug, Smartphone, SquareTerminal } from "lucide-react";
+import { Bell, Check, FolderGit2, Laptop, Plug, Smartphone, SquareTerminal, Wifi } from "lucide-react";
 import { post } from "../api";
 import type { dicts, Lang } from "../i18n";
 import type { ProviderState, Setup, Status } from "../types";
@@ -80,13 +80,28 @@ export function SettingsView({
   const [message, setMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [testSent, setTestSent] = useState(false);
-  const [qr, setQr] = useState<"dashboard" | "ntfy" | null>(null);
+  const [qr, setQr] = useState<"dashboard" | "ntfy" | "lan" | null>(null);
   const [httpsError, setHttpsError] = useState<string | null>(null);
+  const [hooksBusy, setHooksBusy] = useState(false);
 
   const sendTest = async () => {
     await post("/api/notify-test");
     setTestSent(true);
     setTimeout(() => setTestSent(false), 2000);
+  };
+
+  const installHooks = async () => {
+    setHooksBusy(true);
+    const res = await post("/api/setup/hooks");
+    setHooksBusy(false);
+    if (!res.ok) setMessage(res.error ?? null);
+    load();
+  };
+
+  const toggleLan = async (enable: boolean) => {
+    await post("/api/setup/lan", { enable });
+    if (enable) setQr("lan");
+    load();
   };
 
   const load = () =>
@@ -156,7 +171,7 @@ export function SettingsView({
       title: t.stepHooks,
       desc: wired.length > 0 ? t.stepHooksSome(wired.join(", ")) : t.stepHooksNone,
       done: wired.length > 0,
-      action: { label: t.copy, run: () => copyText("keepalive install") },
+      action: { label: hooksBusy ? t.stateInstalling : t.install, run: installHooks },
     },
     {
       id: "clamshell",
@@ -171,7 +186,7 @@ export function SettingsView({
       icon: Smartphone,
       title: t.stepPhone,
       desc: tailscaleIp ? t.stepPhoneDone(tailscaleIp) : t.stepPhoneDesc,
-      done: tailscaleIp !== null,
+      done: tailscaleIp !== null || setup.lan_enabled,
       action: { label: t.connect, run: () => chooseProvider("tailscale") },
     },
     {
@@ -222,6 +237,41 @@ export function SettingsView({
           <div className="qr-block">
             <div className="qr" dangerouslySetInnerHTML={{ __html: setup.dashboard_qr }} />
             <p className="muted small">{t.scanDashboard}</p>
+          </div>
+        )}
+        <div className="row-card">
+          <span className="tile">
+            <Wifi size={16} />
+          </span>
+          <div className="row-body">
+            <strong>{t.settingsLan}</strong>
+            <span className="muted small">
+              {setup.lan_enabled
+                ? (setup.lan_url ?? t.settingsLanNoNetwork)
+                : t.settingsLanDesc}
+            </span>
+          </div>
+          {setup.lan_enabled ? (
+            <>
+              {setup.lan_qr && (
+                <button className="small" onClick={() => setQr(qr === "lan" ? null : "lan")}>
+                  {qr === "lan" ? t.hideQr : t.showQr}
+                </button>
+              )}
+              <button className="danger small" onClick={() => toggleLan(false)}>
+                {t.lanDisable}
+              </button>
+            </>
+          ) : (
+            <button className="small" onClick={() => toggleLan(true)}>
+              {t.lanEnable}
+            </button>
+          )}
+        </div>
+        {qr === "lan" && setup.lan_qr && (
+          <div className="qr-block">
+            <div className="qr" dangerouslySetInnerHTML={{ __html: setup.lan_qr }} />
+            <p className="muted small">{t.scanLan}</p>
           </div>
         )}
         {setup.magic_dns && (

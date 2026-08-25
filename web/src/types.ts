@@ -13,6 +13,7 @@ export type Managed = {
   cmd: string;
   status: "running" | "abandoned";
   respawn_count: number;
+  waiting: boolean;
 };
 export type Status = {
   ok: boolean;
@@ -56,6 +57,9 @@ export type Setup = {
   dashboard_qr: string | null;
   magic_dns: string | null;
   https_enabled: boolean;
+  lan_enabled: boolean;
+  lan_url: string | null;
+  lan_qr: string | null;
   ntfy_url: string | null;
   ntfy_qr: string | null;
 };

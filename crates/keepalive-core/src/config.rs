@@ -26,6 +26,10 @@ pub struct Config {
     pub heartbeat_minutes: u64,
     /// Directories the dashboard may spawn new agent sessions in.
     pub projects: Vec<String>,
+    /// Secret for same-Wi-Fi access without Tailscale (empty = LAN access
+    /// off). A phone on the same network authenticates once with this key
+    /// (via the QR deep link) and gets a session cookie.
+    pub lan_key: String,
 }
 
 impl Default for Config {
@@ -41,6 +45,7 @@ impl Default for Config {
             ntfy_topic: String::new(),
             heartbeat_minutes: 0,
             projects: Vec::new(),
+            lan_key: String::new(),
         }
     }
 }

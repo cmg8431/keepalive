@@ -62,10 +62,16 @@ export function SessionsView({
                   <SquareTerminal size={16} />
                 </span>
                 <div className="row-body">
-                  <strong>{m.dir.split("/").pop()}</strong>
+                  <strong>
+                    {m.dir.split("/").pop()}
+                    {m.waiting && <span className="badge waiting">{t.waitingBadge}</span>}
+                  </strong>
                   <span className="muted small">
-                    {m.status === "running" ? t.running : t.abandoned}
-                    {m.respawn_count > 0 ? ` · ${t.revived(m.respawn_count)}` : ""} · {m.cmd}
+                    {m.waiting
+                      ? t.waitingHint
+                      : `${m.status === "running" ? t.running : t.abandoned}${
+                          m.respawn_count > 0 ? ` · ${t.revived(m.respawn_count)}` : ""
+                        } · ${m.cmd}`}
                   </span>
                 </div>
                 <button className="primary small" onClick={() => onOpenTerminal(m.name)}>
