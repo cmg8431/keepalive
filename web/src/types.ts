@@ -14,7 +14,9 @@ export type Managed = {
   status: "running" | "abandoned";
   respawn_count: number;
   waiting: boolean;
+  idle_secs: number | null;
 };
+export type PortInfo = { port: number; process: string; local_only: boolean };
 export type Status = {
   ok: boolean;
   awake: boolean;

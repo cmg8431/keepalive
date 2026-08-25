@@ -56,6 +56,8 @@ struct AttentionState {
     /// welcome prompt is "waiting" on the dashboard but not push-worthy —
     /// the person who just spawned it knows it's there.
     was_busy: bool,
+    /// When the pane last changed — the "active 2m ago" indicator.
+    last_change: Option<Instant>,
 }
 
 #[derive(Serialize)]
@@ -66,6 +68,8 @@ pub struct ManagedSessionInfo {
     pub status: SessionStatus,
     pub respawn_count: u32,
     pub waiting: bool,
+    /// Seconds since the terminal last changed; None until first observed.
+    pub idle_secs: Option<u64>,
 }
 
 #[derive(Default)]
@@ -479,6 +483,27 @@ impl SessionManager {
         events
     }
 
+    /// The managed session working in `dir`, if any — how a hook event
+    /// (which only knows its cwd) finds its way back to a tmux session.
+    pub fn find_by_dir(&self, dir: &str) -> Option<String> {
+        let dir = std::path::Path::new(dir);
+        self.sessions
+            .iter()
+            .filter(|(_, s)| s.status == SessionStatus::Running && dir.starts_with(&s.dir))
+            // Deepest match wins when projects nest.
+            .max_by_key(|(_, s)| s.dir.components().count())
+            .map(|(name, _)| name.clone())
+    }
+
+    /// Mark a session as waiting right now — a hook told us, no heuristic
+    /// needed. The pane watcher clears it as soon as the agent moves again.
+    pub fn flag_waiting(&mut self, name: &str) {
+        if let Some(s) = self.sessions.get_mut(name) {
+            s.attention.waiting = true;
+            s.attention.notified = true;
+        }
+    }
+
     /// Names of sessions currently alive — these renew wake holds each tick.
     pub fn running(&self) -> Vec<String> {
         self.sessions
@@ -498,6 +523,7 @@ impl SessionManager {
                 status: s.status,
                 respawn_count: s.respawn_count,
                 waiting: s.attention.waiting,
+                idle_secs: s.attention.last_change.map(|t| t.elapsed().as_secs()),
             })
             .collect()
     }
@@ -508,14 +534,19 @@ impl SessionManager {
 /// busy marker. Someone attached in a local terminal is already looking, so
 /// no push for them.
 fn watch_attention(name: &str, session: &mut ManagedSession) -> Option<(String, String)> {
-    if !is_interactive_agent(&session.cmd) {
-        return None;
-    }
     let att = &mut session.attention;
     let pane = pane_text(name)?;
     let hash = hash_pane(&pane);
     let changed = hash != att.pane_hash;
     att.pane_hash = hash;
+    if changed {
+        att.last_change = Some(Instant::now());
+    }
+    // Every session gets the activity clock; only interactive agents get the
+    // waiting heuristic — a quiet build script is just a quiet build script.
+    if !is_interactive_agent(&session.cmd) {
+        return None;
+    }
     if changed || looks_busy(&pane) {
         att.was_busy = att.was_busy || looks_busy(&pane);
         att.stable_ticks = 0;

@@ -56,6 +56,16 @@ pub(crate) enum Request {
     Tail {
         name: String,
     },
+    /// An agent hook says its session needs the user (permission prompt,
+    /// idle wait). Precise where the pane heuristic is approximate.
+    HookNotify {
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        dir: Option<String>,
+    },
     SendText {
         name: String,
         text: String,
@@ -120,6 +130,9 @@ pub(crate) struct Daemon {
     last_tick: Option<Instant>,
     /// 무기한 홀드 동안 잠시 꺼둔 최대 유지 시간. 재우면 되돌린다.
     saved_max_hold_hours: Option<u64>,
+    /// Per-project throttle for hook attention pushes — one pause can emit
+    /// several Notification events.
+    attention_pushed: std::collections::HashMap<String, Instant>,
 }
 
 const CLAMSHELL_REPUSH: Duration = Duration::from_secs(60);
@@ -167,7 +180,85 @@ impl Daemon {
             heartbeat,
             last_tick: None,
             saved_max_hold_hours: None,
+            attention_pushed: std::collections::HashMap::new(),
         }
+    }
+
+    /// An agent said "I need the user" through its Notification hook — the
+    /// precise version of the pane-freeze heuristic. Marks the session
+    /// waiting immediately and pushes once per project per minute, with
+    /// action buttons so simple prompts are answerable from the
+    /// notification itself.
+    fn hook_notify(
+        &mut self,
+        source: Option<String>,
+        message: Option<String>,
+        dir: Option<String>,
+        now: Instant,
+    ) {
+        let key = dir
+            .clone()
+            .or_else(|| source.clone())
+            .unwrap_or_default();
+        if let Some(last) = self.attention_pushed.get(&key)
+            && now.duration_since(*last) < Duration::from_secs(60)
+        {
+            return;
+        }
+        self.attention_pushed.insert(key, now);
+        let session = dir.as_deref().and_then(|d| self.managed.find_by_dir(d));
+        if let Some(name) = &session {
+            self.managed.flag_waiting(name);
+        }
+        let project = dir.as_deref().and_then(|d| {
+            std::path::Path::new(d)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        });
+        let agent = source.unwrap_or_else(|| "agent".into());
+        let text = match (&project, &message) {
+            (Some(p), Some(m)) => format!("{agent} in {p}: {m}"),
+            (Some(p), None) => format!("{agent} in {p} needs your input"),
+            (None, Some(m)) => format!("{agent}: {m}"),
+            (None, None) => format!("{agent} needs your input"),
+        };
+        log(&format!("attention: {text}"));
+        let (base, auth) = self.reach_base();
+        let click = base.as_ref().map(|b| match &session {
+            Some(name) => format!("{b}/s/{name}{auth}"),
+            None => format!("{b}/{auth}"),
+        });
+        let mut actions = Vec::new();
+        if let (Some(b), Some(name)) = (&base, &session) {
+            actions.push(notify::Action {
+                label: "Open".into(),
+                url: format!("{b}/s/{name}{auth}"),
+                post_body: None,
+            });
+            actions.push(notify::Action {
+                label: "Send Enter".into(),
+                url: format!("{b}/api/send{auth}"),
+                post_body: Some(format!("{{\"name\":\"{name}\",\"key\":\"Enter\"}}")),
+            });
+        }
+        notify::push_full(&self.config.ntfy_topic, "Agent needs you", &text, click, actions);
+    }
+
+    /// Best phone-reachable origin plus the auth suffix it needs: the
+    /// tailnet address bare, or the LAN address carrying the pairing key.
+    fn reach_base(&self) -> (Option<String>, String) {
+        if let Some(base) = notify::dashboard_base(self.config.web_port) {
+            return (Some(base), String::new());
+        }
+        if !self.config.lan_key.is_empty()
+            && let Some(ip) = crate::connect::lan_ip()
+        {
+            return (
+                Some(format!("http://{ip}:{}", self.config.web_port)),
+                format!("?k={}", self.config.lan_key),
+            );
+        }
+        (None, String::new())
     }
 
     /// Re-pushed periodically while blocking: heals a failed pmset or a
@@ -272,6 +363,15 @@ impl Daemon {
                 managed_ttl,
                 now,
             );
+        }
+        // Watched processes (config `watch_processes`) hold wake while they
+        // run — the ffmpeg/rsync case that needs no hooks. The TTL releases
+        // the hold within a minute of the process exiting.
+        for proc in &self.config.watch_processes {
+            if process_running(proc) {
+                self.table
+                    .acquire(&format!("process:{proc}"), "process", Some(proc), managed_ttl, now);
+            }
         }
         let pruned = self.table.prune_expired(now);
         if pruned > 0 {
@@ -466,6 +566,14 @@ impl Daemon {
             Request::Sessions => {
                 return serde_json::json!({ "ok": true, "managed": self.managed.list() });
             }
+            Request::HookNotify {
+                source,
+                message,
+                dir,
+            } => {
+                self.hook_notify(source, message, dir, now);
+                serde_json::json!({ "ok": true })
+            }
             Request::Tail { name } => {
                 return match self.managed.tail(&name) {
                     Ok(output) => serde_json::json!({ "ok": true, "output": output }),
@@ -560,6 +668,15 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
         .collect()
+}
+
+/// Exact-name process check (`pgrep -x`), so "node" in a watch list can't
+/// match this daemon's own command line.
+fn process_running(name: &str) -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-x", name])
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Everything worth logging is also worth showing in the dashboard's

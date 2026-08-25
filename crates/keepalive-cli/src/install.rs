@@ -4,11 +4,14 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const LAUNCHD_LABEL: &str = "com.cmg8431.keepalive";
-const HOOK_EVENTS: [(&str, &str); 4] = [
+const HOOK_EVENTS: [(&str, &str); 5] = [
     ("UserPromptSubmit", "acquire"),
     ("PostToolUse", "acquire"),
     ("Stop", "release"),
     ("SessionEnd", "release"),
+    // Fires the moment Claude needs permission or goes idle waiting for the
+    // user — the precise signal behind "your agent needs you" pushes.
+    ("Notification", "hook-notify"),
 ];
 
 pub fn install(hooks_only: bool) -> Result<()> {

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { FolderGit2, SquareTerminal } from "lucide-react";
+import { FolderGit2, Globe, SquareTerminal } from "lucide-react";
 import { post } from "../api";
 import type { dicts } from "../i18n";
-import type { BrowseResult, Projects, Status } from "../types";
+import type { BrowseResult, PortInfo, Projects, Status } from "../types";
 import { EmptyState, IconTile, Row, RowList, Section, SkeletonCard } from "../components";
 import { relTime } from "./status-view";
 
@@ -71,7 +71,7 @@ export function SessionsView({
                       ? t.waitingHint
                       : `${m.status === "running" ? t.running : t.abandoned}${
                           m.respawn_count > 0 ? ` · ${t.revived(m.respawn_count)}` : ""
-                        } · ${m.cmd}`}
+                        }${activityLabel(m.idle_secs, t)} · ${m.cmd}`}
                   </span>
                 </div>
                 <button className="primary small" onClick={() => onOpenTerminal(m.name)}>
@@ -126,8 +126,70 @@ export function SessionsView({
         )}
       </Section>
 
+      <PreviewCard t={t} />
+
       <ProjectsCard t={t} onSpawn={(dir) => act(() => post("/api/spawn", { dir }))} />
     </>
+  );
+}
+
+/** "streaming" while output flows, "quiet for 3m" once it stops. */
+function activityLabel(idleSecs: number | null, t: (typeof dicts)["en"]): string {
+  if (idleSecs === null) return "";
+  return ` · ${idleSecs < 30 ? t.activeNow : t.idleFor(t.dur(idleSecs))}`;
+}
+
+/**
+ * Dev servers listening on the Mac, one tap away from a live preview on the
+ * phone. Hidden entirely when nothing is listening — this card earns its
+ * space only while something is running.
+ */
+function PreviewCard({ t }: { t: (typeof dicts)["en"] }) {
+  const [ports, setPorts] = useState<PortInfo[]>([]);
+
+  useEffect(() => {
+    const load = () =>
+      fetch("/api/ports")
+        .then((r) => r.json())
+        .then((res) => setPorts(res.ports ?? []))
+        .catch(() => undefined);
+    load();
+    const timer = setInterval(load, 10000);
+    return () => clearInterval(timer);
+  }, []);
+
+  if (ports.length === 0) return null;
+  const onMac = ["localhost", "127.0.0.1"].includes(location.hostname);
+
+  return (
+    <Section title={t.previewTitle}>
+      <RowList>
+        {ports.map((p) => (
+          <li key={p.port} className="row-card">
+            <span className="tile">
+              <Globe size={16} />
+            </span>
+            <div className="row-body">
+              <strong className="mono">:{p.port}</strong>
+              <span className="muted small">
+                {p.process}
+                {p.local_only && !onMac ? ` · ${t.previewLocalOnly}` : ""}
+              </span>
+            </div>
+            {(onMac || !p.local_only) && (
+              <a
+                className="button small"
+                href={`http://${location.hostname}:${p.port}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {t.previewOpen}
+              </a>
+            )}
+          </li>
+        ))}
+      </RowList>
+    </Section>
   );
 }
 

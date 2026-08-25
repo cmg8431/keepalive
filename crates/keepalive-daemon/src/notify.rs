@@ -9,6 +9,19 @@ pub fn push(topic: &str, title: &str, message: &str) {
 /// itself is the way back in: tapping it opens that session's terminal on the
 /// phone instead of dropping you on a dashboard you then have to navigate.
 pub fn push_with_click(topic: &str, title: &str, message: &str, click: Option<String>) {
+    push_full(topic, title, message, click, Vec::new());
+}
+
+/// An ntfy action button rendered on the notification itself.
+pub struct Action {
+    pub label: String,
+    pub url: String,
+    /// When set, the button POSTs this JSON instead of opening the URL —
+    /// answering an agent straight from the lock screen.
+    pub post_body: Option<String>,
+}
+
+pub fn push_full(topic: &str, title: &str, message: &str, click: Option<String>, actions: Vec<Action>) {
     if topic.is_empty() {
         return;
     }
@@ -20,6 +33,19 @@ pub fn push_with_click(topic: &str, title: &str, message: &str, click: Option<St
         cmd.args(["-s", "-m", "10", "-H", &format!("Title: {title}")]);
         if let Some(click) = click {
             cmd.args(["-H", &format!("Click: {click}")]);
+        }
+        if !actions.is_empty() {
+            let rendered: Vec<String> = actions
+                .iter()
+                .map(|a| match &a.post_body {
+                    Some(body) => format!(
+                        "http, {}, {}, method=POST, headers.Content-Type=application/json, body='{}'",
+                        a.label, a.url, body
+                    ),
+                    None => format!("view, {}, {}", a.label, a.url),
+                })
+                .collect();
+            cmd.args(["-H", &format!("Actions: {}", rendered.join("; "))]);
         }
         cmd.args(["-d", &message, &url]);
         let _ = cmd

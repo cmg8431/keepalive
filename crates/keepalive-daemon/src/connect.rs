@@ -98,6 +98,54 @@ pub fn lan_ip() -> Option<IpAddr> {
     None
 }
 
+/// Dev servers listening right now (vite on 5173, next on 3000, ...), so the
+/// phone can open a live preview without anyone typing an IP. Binds on
+/// loopback are flagged: reachable from the Mac, invisible to the phone.
+pub fn listening_ports(skip_port: u16) -> Vec<serde_json::Value> {
+    let Ok(out) = Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut seen = std::collections::BTreeMap::new();
+    for line in text.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        let Some(process) = cols.first() else { continue };
+        let Some(addr) = cols.iter().rev().find(|c| c.contains(':')) else {
+            continue;
+        };
+        let Some((host, port)) = addr.rsplit_once(':') else {
+            continue;
+        };
+        let Ok(port) = port.parse::<u16>() else {
+            continue;
+        };
+        // The dev-server neighborhood; anything higher is ephemeral noise.
+        if port == skip_port || !(1024..10000).contains(&port) {
+            continue;
+        }
+        // Always-on macOS system listeners (AirPlay, Handoff) are not dev
+        // servers no matter how dev-shaped their ports look.
+        if matches!(*process, "ControlCe" | "rapportd" | "sharingd" | "AirPlayXP") {
+            continue;
+        }
+        let local_only = host.starts_with("127.") || host == "[::1]" || host == "localhost";
+        // A wildcard bind for the same port beats a loopback one.
+        let entry = seen.entry(port).or_insert((process.to_string(), local_only));
+        if entry.1 && !local_only {
+            *entry = (process.to_string(), false);
+        }
+    }
+    seen.into_iter()
+        .take(8)
+        .map(|(port, (process, local_only))| {
+            serde_json::json!({ "port": port, "process": process, "local_only": local_only })
+        })
+        .collect()
+}
+
 /// The machine's MagicDNS name (`macbookpro.tailXXXX.ts.net`), which is both
 /// nicer to type than an IP and the only name a TLS certificate can be issued
 /// for.

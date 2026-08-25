@@ -30,6 +30,9 @@ pub struct Config {
     /// off). A phone on the same network authenticates once with this key
     /// (via the QR deep link) and gets a session cookie.
     pub lan_key: String,
+    /// Process names that hold the Mac awake while running, hooks or not —
+    /// e.g. ["ffmpeg", "rsync"] keeps long encodes and transfers alive.
+    pub watch_processes: Vec<String>,
 }
 
 impl Default for Config {
@@ -46,6 +49,7 @@ impl Default for Config {
             heartbeat_minutes: 0,
             projects: Vec::new(),
             lan_key: String::new(),
+            watch_processes: Vec::new(),
         }
     }
 }

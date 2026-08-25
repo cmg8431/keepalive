@@ -48,6 +48,15 @@ enum Commands {
         #[arg(long)]
         tool: Option<String>,
     },
+    /// Forward an agent's attention request (permission prompt, idle wait)
+    /// to the daemon, which pushes it to the phone
+    #[command(hide = true)]
+    HookNotify {
+        #[arg(long)]
+        from_hook: bool,
+        #[arg(long)]
+        tool: Option<String>,
+    },
     /// Keep the Mac awake manually, no agent needed
     Hold {
         #[arg(long, default_value_t = 60)]
@@ -102,6 +111,9 @@ fn main() {
         } | Commands::Release {
             from_hook: true,
             ..
+        } | Commands::HookNotify {
+            from_hook: true,
+            ..
         }
     );
     if let Err(e) = run(cli) {
@@ -146,6 +158,23 @@ fn run(cli: Cli) -> Result<()> {
         } => {
             let hook = resolve_session(id, String::new(), tool, from_hook)?;
             client::request(&serde_json::json!({ "cmd": "release", "id": hook.id }))?;
+            Ok(())
+        }
+        Commands::HookNotify { from_hook, tool } => {
+            let tool = tool.unwrap_or_else(|| "claude-code".to_string());
+            let mut input = String::new();
+            if from_hook {
+                std::io::stdin().read_to_string(&mut input)?;
+            }
+            let payload = serde_json::from_str::<serde_json::Value>(&input).unwrap_or_default();
+            let mut req = serde_json::json!({ "cmd": "hook_notify", "source": tool });
+            if let Some(message) = payload["message"].as_str() {
+                req["message"] = message.into();
+            }
+            if let Some(cwd) = payload["cwd"].as_str() {
+                req["dir"] = cwd.into();
+            }
+            client::request(&req)?;
             Ok(())
         }
         Commands::Hold { minutes } => {

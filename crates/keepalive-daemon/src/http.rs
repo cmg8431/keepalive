@@ -45,6 +45,7 @@ pub async fn serve_http(daemon: Arc<Mutex<Daemon>>, config: Config) {
         .route("/api/projects/add", post(api_projects_add))
         .route("/api/projects/remove", post(api_projects_remove))
         .route("/api/browse", get(api_browse))
+        .route("/api/ports", get(api_ports))
         .route("/api/notify-test", post(api_notify_test))
         .route("/api/open-browser", post(api_open_browser))
         .route("/api/setup", get(api_setup))
@@ -659,6 +660,11 @@ async fn api_tail(
     Json(body): Json<KillBody>,
 ) -> Json<serde_json::Value> {
     Json(ask(&state, Request::Tail { name: body.name }))
+}
+
+async fn api_ports(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let port = state.daemon.lock().unwrap().config().web_port;
+    Json(serde_json::json!({ "ok": true, "ports": crate::connect::listening_ports(port) }))
 }
 
 async fn api_notify_test(State(state): State<AppState>) -> Json<serde_json::Value> {

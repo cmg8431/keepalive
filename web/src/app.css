@@ -586,7 +586,8 @@ body.panel .provider:hover {
 
 /* ---- controls ---- */
 
-button {
+button,
+a.button {
   background: var(--surface-higher);
   color: var(--fg-heaviest);
   border: none;
@@ -598,6 +599,18 @@ button {
   font-weight: var(--weight-bold);
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+}
+
+a.button {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+a.button.small {
+  padding: 5px 10px;
+  min-height: 0;
+  font-size: var(--text-12);
 }
 
 button:hover {

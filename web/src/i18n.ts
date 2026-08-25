@@ -218,6 +218,11 @@ const ko = {
   scanLan: "같은 와이파이의 폰으로 찍으면 페어링까지 한 번에 끝나요. 밖에서는 Tailscale로 접속하세요",
   waitingBadge: "답 기다리는 중",
   waitingHint: "에이전트가 물어보고 멈춰 있어요. 열어서 답해주세요",
+  activeNow: "출력 중",
+  idleFor: (d: string) => `조용한 지 ${d}`,
+  previewTitle: "데브 서버 미리보기",
+  previewOpen: "열기",
+  previewLocalOnly: "맥에서만 열려요. --host 로 띄우면 폰에서도 접근돼요",
 };
 
 const en: typeof ko = {
@@ -423,6 +428,11 @@ const en: typeof ko = {
     "Scan from a phone on this Wi-Fi — the link carries the pairing key. Away from home, use Tailscale",
   waitingBadge: "waiting for you",
   waitingHint: "The agent asked something and is parked. Open it and answer",
+  activeNow: "streaming",
+  idleFor: (d: string) => `quiet for ${d}`,
+  previewTitle: "Dev server preview",
+  previewOpen: "Open",
+  previewLocalOnly: "Mac-only bind. Start it with --host to reach it from your phone",
 };
 
 export const dicts = { ko, en };
